@@ -17,7 +17,6 @@ Cascade Engine is a multi-tier LLM inference router designed to optimize the bal
 The system consists of:
 - `python_core/router/`: Contains routing logic, benchmark scripts, and intelligent layers.
 - `python_core/engines/`: Connectors to local models (Ollama) and cloud APIs (OpenAI).
-- `paper/`: The academic manuscript detailing the theory and results of the Cascade Engine.
 
 ### How It Works
 
