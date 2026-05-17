@@ -79,10 +79,6 @@ pytest
 python python_core/scripts/run_experiment.py
 ```
 
-## Academic Submission
-
-This repository contains the official implementation of our paper on multi-tier inference routing. The LaTeX source code for the paper is located in the `paper/` directory.
-
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
