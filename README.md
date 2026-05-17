@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Cascade Engine
 
 Cascade Engine is a multi-tier LLM inference router designed to optimize the balance between cost, speed, and accuracy. It intelligently routes incoming requests across different model tiers (e.g., local 3B models, mid-tier cloud models, and premium frontier models) to significantly reduce serving costs while maintaining high quality.
@@ -87,3 +88,7 @@ This repository contains the official implementation of our paper on multi-tier 
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+=======
+# cascade-engine
+A cost-effective LLM routing engine integrating DistilBERT, FAISS, and Presidio for smart request triage across local and frontier models.
+>>>>>>> 88ca7983254b89f6b646b22e7aa8359dc62d3906
