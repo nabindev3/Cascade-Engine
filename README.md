@@ -34,22 +34,22 @@ flowchart TD
     classDef tier2 fill:#fff8e1,stroke:#fbc02d,stroke-width:2px;
     classDef tier3 fill:#ffebee,stroke:#d32f2f,stroke-width:2px;
     
-    A([User Request]):::request --> B[PrivacyFilter <br/>(Presidio)]:::filter
-    B --> C{SemanticCache <br/>(FAISS)}:::filter
+    A(["User Request"]):::request --> B["PrivacyFilter <br/>(Presidio)"]:::filter
+    B --> C{"SemanticCache <br/>(FAISS)"}:::filter
     
-    C -- "Cache Hit" --> D([Return Cached Response]):::request
+    C -- "Cache Hit" --> D(["Return Cached Response"]):::request
     
-    C -- "Cache Miss" --> E[Gatekeeper & Intent <br/>(DistilBERT + VADER)]:::filter
-    E --> F{Routing Decision}:::router
+    C -- "Cache Miss" --> E["Gatekeeper & Intent <br/>(DistilBERT + VADER)"]:::filter
+    E --> F{"Routing Decision"}:::router
     
-    F -- "Simple / Factual" --> G[Tier 1: Local Model <br/>llama3.2:3b]:::tier1
-    F -- "Moderate" --> H[Tier 2: Mid-Cloud <br/>gpt-4o-mini]:::tier2
-    F -- "Complex Reasoning" --> I[Tier 3: Premium <br/>gpt-4o]:::tier3
+    F -- "Simple / Factual" --> G["Tier 1: Local Model <br/>llama3.2:3b"]:::tier1
+    F -- "Moderate" --> H["Tier 2: Mid-Cloud <br/>gpt-4o-mini"]:::tier2
+    F -- "Complex Reasoning" --> I["Tier 3: Premium <br/>gpt-4o"]:::tier3
     
-    G --> J[(Update Cache)]
+    G --> J[("Update Cache")]
     H --> J
     I --> J
-    J --> K([Final Response]):::request
+    J --> K(["Final Response"]):::request
     D --> K
 ```
 
