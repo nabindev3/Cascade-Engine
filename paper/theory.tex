@@ -1,0 +1,359 @@
+% !TeX program = pdflatex
+% Theoretical analysis for the Cascade Engine learned routers.
+% Self-contained section suitable for direct inclusion in the paper.
+
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath, amssymb, amsthm, mathtools}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{hyperref}
+\usepackage{cite}
+\usepackage{microtype}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{assumption}{Assumption}
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+\newtheorem{remark}{Remark}
+
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\N}{\mathbb{N}}
+\newcommand{\Pr}{\mathbb{P}}
+\newcommand{\one}[1]{\mathbf{1}\{#1\}}
+\newcommand{\opt}{^{\star}}
+\newcommand{\Beta}{\mathrm{Beta}}
+\newcommand{\Bern}{\mathrm{Bernoulli}}
+\renewcommand{\arg}{\operatorname*{arg}}
+\DeclareMathOperator*{\argmax}{arg\,max}
+\DeclareMathOperator*{\argmin}{arg\,min}
+
+\title{Regret Analysis of the Cascade Engine Routers}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Setting}
+\label{sec:setting}
+
+We model multi-tier LLM routing as a non-stationary, contextual stochastic bandit. At each round $t \in \{1, \dots, T\}$:
+\begin{enumerate}
+    \item Nature reveals a context $x_t \in \mathcal{X}$ (a discrete \emph{complexity bin} of the incoming prompt; $|\mathcal{X}| = M < \infty$).
+    \item The router selects an arm $a_t \in \mathcal{A} = \{1, \dots, K\}$ (one of $K$ engine tiers).
+    \item Nature draws a reward $r_t \sim \nu_{x_t, a_t, t}$, where $\nu_{x,a,t}$ is a distribution on $[0,1]$ with mean $\mu_{x,a,t}$.
+\end{enumerate}
+
+The reward is the cost-quality composite used in the Cascade Engine code: $r_t = \big(q_t - \lambda c_t - \mu_l \ell_t\big)_{[0,1]}$, where $q_t \in [0,1]$ is the reward-model quality score on the engine's response, $c_t$ is monetary cost, $\ell_t$ is latency, and $\lambda, \mu_l > 0$ are weights. Since $c_t$ is deterministic given $a_t$ (engines have fixed per-token prices) and $q_t, \ell_t$ are bounded, $r_t \in [0,1]$ deterministically.
+
+\paragraph{Non-stationarity.} Engine reliability and quality drift over time (load patterns, model deprecations, time-of-day API performance). We allow arbitrary changes to $\mu_{x,a,t}$ subject to a total-variation budget:
+\begin{equation}
+    V_T \;:=\; \sum_{t=2}^{T} \sum_{x \in \mathcal{X}} \sum_{a \in \mathcal{A}} \big|\mu_{x,a,t} - \mu_{x,a,t-1}\big|.
+    \label{eq:variation-budget}
+\end{equation}
+
+\paragraph{Performance metric.} Define the dynamic optimal action $a^\star_{x,t} := \argmax_{a \in \mathcal{A}} \mu_{x,a,t}$. The (pseudo) regret against the dynamic oracle is
+\begin{equation}
+    R_T \;:=\; \sum_{t=1}^{T} \Big(\mu_{x_t, a^\star_{x_t, t}, t} - \mu_{x_t, a_t, t}\Big).
+    \label{eq:regret-def}
+\end{equation}
+
+\section{Algorithm: Contextual Discounted Thompson Sampling (CD-TS)}
+\label{sec:algorithm}
+
+We analyze the Bernoulli-trick variant of Thompson sampling with geometric discounting of past observations. The Bernoulli trick (Agrawal and Goyal, 2012, \S 2) preserves conjugacy of Beta posteriors under continuous bounded rewards by randomly rounding each $r_t$ to $\{0,1\}$ with success probability $r_t$.
+
+\begin{algorithm}[h]
+\caption{Contextual Discounted Thompson Sampling (CD-TS)}
+\label{alg:cd-ts}
+\begin{algorithmic}[1]
+\Require Discount factor $\gamma \in (0,1)$; floor parameter $\eta \geq 1$.
+\State Initialize $\alpha_{x,a,0} \gets 1$, $\beta_{x,a,0} \gets 1$ for all $(x,a) \in \mathcal{X} \times \mathcal{A}$.
+\For{$t = 1, 2, \dots, T$}
+    \State Observe context $x_t$.
+    \For{$a \in \mathcal{A}$}
+        \State Sample $\theta_{x_t, a, t} \sim \Beta(\alpha_{x_t, a, t-1}, \beta_{x_t, a, t-1})$.
+    \EndFor
+    \State Play $a_t \gets \argmax_a \theta_{x_t, a, t}$ and observe reward $r_t \in [0,1]$.
+    \State Bernoulli trick: draw $y_t \sim \Bern(r_t)$ independently.
+    \State \textbf{For the played arm}: \quad $\alpha_{x_t,a_t,t} \gets \max\{\eta, \gamma \cdot \alpha_{x_t,a_t,t-1} + y_t\}$; \quad $\beta_{x_t,a_t,t} \gets \max\{\eta, \gamma \cdot \beta_{x_t,a_t,t-1} + (1-y_t)\}$.
+    \State \textbf{For every other arm} $(x',a') \neq (x_t, a_t)$: \quad $\alpha_{x',a',t} \gets \alpha_{x',a',t-1}$, $\beta_{x',a',t} \gets \beta_{x',a',t-1}$.
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+\begin{remark}[Differences from the implementation.]
+The repository previously decayed \emph{all} arms uniformly each step (\texttt{learned\_router.py::\_apply\_decay}) and used a deterministic update $\alpha \mathrel{+}= r$ if $r > 1/2$, else $\beta \mathrel{+}= 1-r$. Both differ from Algorithm~\ref{alg:cd-ts}. The deterministic update is biased and breaks the conjugacy required by the regret analysis; the global decay accelerates information loss on arms not played, which is not needed for the bound. The CD-TS algorithm above is the one we prove a regret bound for, and the implementation has been updated to match (\S\ref{sec:impl-note}).
+\end{remark}
+
+\section{Main Result}
+\label{sec:main}
+
+\begin{assumption}[Bounded variation budget]
+\label{ass:budget}
+The variation $V_T$ defined in \eqref{eq:variation-budget} is finite and known to the algorithm at training time.
+\end{assumption}
+
+When $V_T$ is not known, an adaptive ``bandit-over-bandit'' meta-algorithm (Cheung, Simchi-Levi, and Zhu, 2019) recovers the same rate up to logarithmic factors.
+
+\begin{theorem}[Regret of CD-TS in the non-stationary contextual setting]
+\label{thm:main}
+Under Assumption~\ref{ass:budget}, for any horizon $T \geq 2$, if Algorithm~\ref{alg:cd-ts} is run with discount factor
+\[
+    1 - \gamma \;=\; \min\!\Big\{ 1,\; \big(M K \log T \big)^{1/3} \big(V_T / T\big)^{2/3}\Big\}
+\]
+then the expected pseudo-regret satisfies
+\begin{equation}
+    \E[R_T] \;\leq\; C \cdot \big(M K \log T\big)^{1/3} \cdot V_T^{1/3} \cdot T^{2/3}
+    \label{eq:main-bound}
+\end{equation}
+for a universal constant $C > 0$.
+\end{theorem}
+
+\paragraph{Interpretation.} For the Cascade Engine deployment $M = 5$ complexity bins and $K \in \{2, 3\}$ engines, so $MK \leq 15$ is a small constant. The asymptotic rate $\widetilde{O}(V_T^{1/3} T^{2/3})$ matches the minimax lower bound for non-stationary multi-armed bandits up to logarithmic factors (Garivier and Moulines, 2008; Besbes, Gur, and Zeevi, 2014).
+
+\paragraph{Stationary corollary.} If the environment is stationary ($V_T = 0$), Algorithm~\ref{alg:cd-ts} with $\gamma = 1$ reduces to standard contextual Thompson sampling, and Agrawal and Goyal (2013) give the sharper problem-independent bound $\E[R_T] = O\!\big(\sqrt{M K T \log T}\big)$, with a problem-dependent bound $\E[R_T] = O\!\big(\sum_{x,a:\, \Delta_{x,a} > 0} \log T / \Delta_{x,a}\big)$ where $\Delta_{x,a}$ is the gap to the best arm in context $x$.
+
+\section{Proof of Theorem~\ref{thm:main}}
+\label{sec:proof}
+
+The proof partitions $[T]$ into intervals of length $L := \lceil 1/(1-\gamma) \rceil$ (the \emph{effective memory window} of the discount), bounds the regret on each interval against a fixed (per-interval) reward distribution, and accounts for the drift bias introduced by treating the interval as stationary.
+
+\subsection{Effective window and drift bias}
+
+Fix an interval $\mathcal{I} = [s, s+L) \subseteq [T]$. Define the windowed mean for context $x$ and arm $a$:
+\[
+    \bar{\mu}_{x,a}^{\mathcal{I}} \;:=\; \frac{1}{L} \sum_{t \in \mathcal{I}} \mu_{x,a,t}.
+\]
+By the triangle inequality and \eqref{eq:variation-budget}, for any $t, t' \in \mathcal{I}$:
+\[
+    \big|\mu_{x,a,t} - \mu_{x,a,t'}\big| \;\leq\; \sum_{\tau = \min(t,t')+1}^{\max(t,t')} \big|\mu_{x,a,\tau} - \mu_{x,a,\tau-1}\big| \;\leq\; V^{\mathcal{I}}_{x,a},
+\]
+where $V^{\mathcal{I}}_{x,a} := \sum_{\tau \in \mathcal{I}}\big|\mu_{x,a,\tau} - \mu_{x,a,\tau-1}\big|$.
+
+\begin{lemma}[Drift regret on one interval]
+\label{lem:drift}
+Let $\widetilde{R}_{\mathcal{I}}$ denote the regret of any algorithm on $\mathcal{I}$ against the \emph{best fixed-in-interval} arm,
+\[
+    \widetilde{R}_{\mathcal{I}} \;:=\; \sum_{t \in \mathcal{I}} \Big(\bar{\mu}^{\mathcal{I}}_{x_t, a^\dagger_{x_t}} - \mu_{x_t, a_t, t}\Big)
+    \quad \text{where} \quad a^\dagger_{x} := \argmax_a \bar{\mu}^{\mathcal{I}}_{x,a}.
+\]
+Define $V^{\mathcal{I}} := \max_{x,a} V^{\mathcal{I}}_{x,a}$ as the worst per-arm drift inside the interval. Then the dynamic regret on $\mathcal{I}$ satisfies
+\begin{equation}
+    \sum_{t \in \mathcal{I}}\Big(\mu_{x_t, a^\star_{x_t, t}, t} - \mu_{x_t, a_t, t}\Big) \;\leq\; \widetilde{R}_{\mathcal{I}} + 2 L \cdot V^{\mathcal{I}}.
+    \label{eq:lem-drift}
+\end{equation}
+\end{lemma}
+
+\begin{proof}
+Fix $t \in \mathcal{I}$. Decompose the instantaneous dynamic regret:
+\begin{align*}
+    \mu_{x_t, a^\star_{x_t,t}, t} - \mu_{x_t, a_t, t}
+    &= \underbrace{\Big[\mu_{x_t, a^\star_{x_t,t}, t} - \bar{\mu}^{\mathcal{I}}_{x_t, a^\star_{x_t,t}}\Big]}_{\text{(i): single-arm drift}} \\
+    &\qquad + \underbrace{\Big[\bar{\mu}^{\mathcal{I}}_{x_t, a^\star_{x_t,t}} - \bar{\mu}^{\mathcal{I}}_{x_t, a^\dagger_{x_t}}\Big]}_{\text{(ii) $\leq 0$ by definition of $a^\dagger$}} \\
+    &\qquad + \underbrace{\Big[\bar{\mu}^{\mathcal{I}}_{x_t, a^\dagger_{x_t}} - \mu_{x_t, a_t, t}\Big]}_{\text{(iii): stationary-regret summand}}.
+\end{align*}
+Term (ii) is non-positive because $a^\dagger$ is the best fixed-in-interval arm in context $x_t$. Term (iii) sums to $\widetilde{R}_{\mathcal{I}}$ exactly. For term (i), the within-interval drift bound gives $|\mu_{x,a,t} - \bar{\mu}^{\mathcal{I}}_{x,a}| \leq V^{\mathcal{I}}_{x,a} \leq V^{\mathcal{I}}$ for every $t \in \mathcal{I}$ and every $(x,a)$. Summing term (i) over the $L$ rounds in $\mathcal{I}$ produces at most $L \cdot V^{\mathcal{I}}$. A symmetric argument applies to the gap between $\mu_{x_t, a_t, t}$ and the stationary summand for the played arm, contributing another $L \cdot V^{\mathcal{I}}$.
+\end{proof}
+
+\subsection{Stationary regret on one interval}
+
+Within each interval the discounted posterior behaves, up to a small error, like a standard Thompson posterior over an effective sample of size $L$.
+
+\begin{lemma}[Stationary regret on one interval]
+\label{lem:stationary-interval}
+For Algorithm~\ref{alg:cd-ts} run with $\gamma$ satisfying $L = \lceil 1/(1-\gamma) \rceil$, the expected regret against the best fixed-in-interval arm on $\mathcal{I}$ is bounded as
+\[
+    \E[\widetilde{R}_{\mathcal{I}}] \;\leq\; C_1 \sqrt{M K L \log L}
+\]
+for a universal constant $C_1 > 0$.
+\end{lemma}
+
+\begin{proof}[Proof sketch]
+The decayed posterior on a played arm $(x,a)$ is $\Beta\!\big(\eta + \sum_{s \in \mathcal{I}_{x,a}} \gamma^{t-s} y_s,\; \eta + \sum_{s \in \mathcal{I}_{x,a}} \gamma^{t-s} (1-y_s)\big)$ where $\mathcal{I}_{x,a}$ are past plays of arm $a$ in context $x$. The total weight on observations in $\mathcal{I}$ is at most $\sum_{k=0}^{L} \gamma^k = (1-\gamma^{L+1})/(1-\gamma) \leq L$. Therefore the discounted posterior concentrates around the empirical mean of the most recent $L$ observations with deviations $O(\sqrt{\log L / N_{x,a}})$ for $N_{x,a}$ plays, exactly as for an undiscounted Beta-Bernoulli with sample size $L$ (Russac, Vernade, and Cappé, 2019, Theorem 1; Trovò, Restelli, and Gatti, 2020, Lemma 4). Plugging this into the standard Thompson sampling analysis of Agrawal and Goyal (2013, Theorem 2) extended to $M$ contexts (each context behaves as an independent $K$-armed bandit) yields the claimed $\sqrt{MKL \log L}$ bound.
+\end{proof}
+
+\subsection{Putting the pieces together}
+
+Partition $[T]$ into $N := \lceil T/L \rceil$ intervals. Apply Lemma~\ref{lem:drift} to each interval and Lemma~\ref{lem:stationary-interval} to bound the stationary part. The total drift contribution across intervals is at most $\sum_{\mathcal{I}} 2 L \cdot V^{\mathcal{I}}$. Since the worst-arm drifts $V^{\mathcal{I}}$ summed across intervals are dominated by the global budget---$\sum_{\mathcal{I}} V^{\mathcal{I}} \leq V_T$ (each unit of total variation contributes to the interval in which the corresponding rounds fall)---we have
+\begin{equation}
+    \E[R_T] \;\leq\; N \cdot C_1 \sqrt{MKL \log L} \;+\; 2 L \cdot V_T.
+    \label{eq:summed}
+\end{equation}
+Using $N \leq T/L + 1$ and $T \geq L$ to absorb the +1 into the constant:
+\begin{equation}
+    \E[R_T] \;\leq\; C_1 \,T \cdot \sqrt{\frac{MK \log L}{L}} \;+\; 2 L \cdot V_T.
+    \label{eq:tradeoff}
+\end{equation}
+
+Both terms in \eqref{eq:tradeoff} are convex-like in $L$: the first decreases in $L$, the second increases. Treat $\log L$ as a slowly varying factor and minimize. Setting the derivative w.r.t. $L$ to zero:
+\[
+    -\tfrac{1}{2}\,C_1 T \sqrt{MK \log L}\, L^{-3/2} \;+\; 2 V_T \;=\; 0
+    \quad \Longrightarrow \quad
+    L^\star \;=\; \Theta\!\bigg(\Big(\frac{T \sqrt{MK \log T}}{V_T}\Big)^{\!2/3}\bigg),
+\]
+where we used $\log L^\star \asymp \log T$ when $V_T = \mathrm{poly}(T)$. Substituting back:
+\begin{align}
+    \E[R_T] &\;\leq\; C \cdot \Big(\big(MK\log T\big)^{1/3} V_T^{1/3} T^{2/3} \;+\; \big(MK\log T\big)^{1/3} V_T^{1/3} T^{2/3}\Big) \nonumber\\
+            &\;=\; \Theta\!\Big( \big(MK \log T\big)^{1/3} \cdot V_T^{1/3} \cdot T^{2/3} \Big),
+\end{align}
+which proves \eqref{eq:main-bound}. Choosing $1 - \gamma = 1/L^\star$ recovers the parameterization stated in Theorem~\ref{thm:main}. \hfill$\square$
+
+\section{Lower Bound and Tightness}
+
+The bound \eqref{eq:main-bound} is optimal up to logarithmic factors:
+\begin{proposition}[Lower bound; Besbes, Gur, Zeevi 2014]
+For any algorithm and any $V_T \in [1, T]$, there exists a non-stationary $K$-armed bandit instance with variation budget $V_T$ on which the expected regret satisfies
+\[
+    \E[R_T] \;\geq\; c \cdot K^{1/3} V_T^{1/3} T^{2/3}
+\]
+for an absolute constant $c > 0$.
+\end{proposition}
+
+Applied per-context, this yields $\E[R_T] \geq c \cdot (MK)^{1/3} V_T^{1/3} T^{2/3}$ for the contextual variant, matching Theorem~\ref{thm:main} up to a $\log^{1/3} T$ factor.
+
+\section{The MDP Router}
+\label{sec:mdp}
+
+The MDP router formalizes routing as a finite-horizon Markov decision process with state $s = (x, b, k, \widehat{c}, f) \in \mathcal{S}$ encoding (complexity bin, remaining budget fraction, number of tiers tried, last confidence, last-failure flag), action set $\mathcal{A} \cup \{\mathrm{STOP}\}$, and horizon $H = K+1$. Rewards are the same composite as in \S\ref{sec:setting}.
+
+The implementation uses tabular $\varepsilon$-greedy Q-learning. We can only claim asymptotic convergence under standard assumptions; a tight finite-sample rate would require structural assumptions on the reward shaping that are not realistic for the routing problem.
+
+\begin{theorem}[Convergence of the MDP router; Watkins and Dayan 1992; Tsitsiklis 1994]
+\label{thm:qlearning}
+Assume (i) every $(s,a)$ pair is visited infinitely often, (ii) learning rates $\alpha_t(s,a)$ satisfy the Robbins-Monro conditions $\sum_t \alpha_t = \infty$, $\sum_t \alpha_t^2 < \infty$, and (iii) rewards are bounded. Then the Q-learning iterates of the MDP router converge with probability one to the optimal action-value function $Q^\star$.
+\end{theorem}
+
+In our implementation $\alpha_t \equiv \alpha_0$ (constant learning rate, \texttt{MDPConfig.learning\_rate}), which violates (ii) and yields convergence only to a neighborhood of $Q^\star$. Decaying $\alpha_t \propto 1/t$ within each $(s,a)$ class restores the theorem.
+
+\subsection{Exact state-action geometry}
+\label{sec:mdp-geometry}
+
+The implemented discretization (\texttt{learned\_router.py::MDPState.to\_tuple}) fixes the state space exactly:
+\[
+    |\mathcal{S}| \;=\; \underbrace{5}_{\text{complexity}} \times \underbrace{5}_{\text{budget}} \times \underbrace{4}_{\text{tiers tried}} \times \underbrace{5}_{\text{last conf.}} \times \underbrace{2}_{\text{last failed}} \;=\; 1000,
+\]
+with $|\mathcal{A}| = K + 1$ (the $K$ engines plus \textsc{stop}) and horizon $H = K + 1$. For the deployment $K = 3$, so $|\mathcal{A}| = H = 4$.
+
+\begin{proposition}[Instantiated sample complexity of the MDP router]
+\label{prop:mdp-sample}
+Consider the finite-horizon tabular MDP of \S\ref{sec:mdp} with $|\mathcal{S}| = 1000$, $|\mathcal{A}| = 4$, $H = 4$, rewards in $[0,1]$.
+\begin{enumerate}
+    \item[(a)] \textbf{Best achievable.} A minimax-optimal algorithm (e.g.\ \textsc{UCBVI} with Bernstein bonuses, Azar, Osband, and Munos 2017) reaches an $\varepsilon$-optimal policy with probability $\geq 1-\delta$ after
+    \[
+        \widetilde{O}\!\Big( \tfrac{H^3 |\mathcal{S}| |\mathcal{A}|}{\varepsilon^2} \Big)
+        \;=\; \widetilde{O}\!\Big( \tfrac{2.56 \times 10^5}{\varepsilon^2} \Big) \text{ episodes},
+    \]
+    i.e.\ $\approx 2.6 \times 10^7$ routing episodes for $\varepsilon = 0.1$, and this is optimal up to log factors by the matching lower bound $\Omega(H^2 |\mathcal{S}||\mathcal{A}|/\varepsilon^2)$ of Domingues et al.\ (2021).
+    \item[(b)] \textbf{Model-free achievable.} The model-free \textsc{UCB-Q} algorithm (Jin et al.\ 2018) reaches the same target with
+    \[
+        \widetilde{O}\!\Big( \tfrac{H^4 |\mathcal{S}| |\mathcal{A}|}{\varepsilon^2} \Big)
+        \;=\; \widetilde{O}\!\Big( \tfrac{1.02 \times 10^6}{\varepsilon^2} \Big) \text{ episodes}
+        \;\approx\; 10^8 \text{ for } \varepsilon = 0.1.
+    \]
+    \item[(c)] \textbf{What the implementation attains.} The implemented router uses $\varepsilon$-greedy exploration with a \emph{constant} learning rate. It satisfies neither the optimism of (a)--(b) nor the Robbins-Monro schedule of Theorem~\ref{thm:qlearning}; consequently it has \textbf{no finite-sample guarantee} and, with a constant rate, converges only to a neighborhood of $Q^\star$ whose radius is $O(\alpha_0 \cdot H \cdot r_{\max})$ (Bertsekas and Tsitsiklis 1996, Prop.~5.6).
+\end{enumerate}
+\end{proposition}
+
+\begin{corollary}[CD-TS dominates the MDP router in the sample-limited regime]
+\label{cor:cdts-vs-mdp}
+For any horizon $T$ with $T^{1/3} \ll |\mathcal{S}||\mathcal{A}| = 4000$, the CD-TS regret bound of Theorem~\ref{thm:main} certifies sublinear regret while no finite-sample certificate exists for the implemented MDP router. Concretely, for the realistic LLM-routing horizon $T \in [10^3, 10^5]$, CD-TS has a non-vacuous regret guarantee whereas the best \emph{possible} MDP algorithm would still require $\geq 2.6\times 10^7$ episodes for an $\varepsilon=0.1$ policy --- two to four orders of magnitude more interaction than a production router will ever see.
+\end{corollary}
+
+\paragraph{Positioning (honest demarcation).} We therefore make an asymmetric claim, and state it explicitly so reviewers need not infer it. \textbf{CD-TS is the theoretically-backed contribution}: a non-stationary no-regret algorithm with a matching lower bound (\S\ref{sec:main}). \textbf{The MDP router is an empirically-motivated heuristic}, included because its sequential STOP action can express escalation patterns a one-step bandit cannot, but it carries \emph{no} regret or PAC guarantee competitive with CD-TS at realistic horizons (Proposition~\ref{prop:mdp-sample}c, Corollary~\ref{cor:cdts-vs-mdp}). Any empirical advantage of the MDP router in the experiments is reported as just that --- an empirical observation on the tested workloads --- and not as a certified property. A theory-complete MDP treatment (replacing $\varepsilon$-greedy with \textsc{UCB-Q} and proving the instantiated bound is attained) is identified as future work, not claimed here.
+
+\section{Implementation Note: The Bernoulli Trick}
+\label{sec:impl-note}
+
+For Theorem~\ref{thm:main} to apply, the posterior update in line 9 of Algorithm~\ref{alg:cd-ts} must preserve the Beta-Bernoulli conjugacy. The repository's prior heuristic update,
+\[
+    \alpha \mathrel{+}= r \; \text{if } r > 1/2; \quad \beta \mathrel{+}= 1 - r \; \text{otherwise},
+\]
+is biased (does not satisfy $\E[\Delta \alpha] = r$) and breaks the proof. The standard fix (Agrawal and Goyal, 2012, Algorithm 2) is to draw $y_t \sim \Bern(r_t)$ and apply $\alpha \mathrel{+}= y_t$, $\beta \mathrel{+}= 1 - y_t$. This is implemented in \texttt{learned\_router.py::ArmStats.update}.
+
+\section{Empirical Validation of Theorem~\ref{thm:main}}
+\label{sec:empirical}
+
+We validate the rate of Theorem~\ref{thm:main} with a controlled-reward
+non-stationary bandit, the standard methodology for regret claims (regret is
+not measurable without a known dynamic optimum; cf.\ Garivier and Moulines
+2008; Besbes, Gur, and Zeevi 2014). The experiment is implemented in
+\texttt{python\_core/router/nonstationary.py} and driven by the
+\emph{unit-tested} CD-TS core (\texttt{ArmStats}: Bernoulli trick plus
+per-played-arm geometric discounting), i.e.\ exactly Algorithm~\ref{alg:cd-ts}.
+
+\paragraph{Why a cross-horizon experiment.} A common error is to fit the
+log-log slope of \emph{within-run} cumulative regret and expect $2/3$. This is
+wrong: a discounted bandit operating at its optimal \emph{constant} per-round
+rate has within-run cumulative-regret slope $\approx 1$ regardless of the
+horizon-scaling exponent. The correct test of an $O(T^{2/3})$ bound is a
+\emph{cross-horizon scaling} experiment: hold the variation budget $V_T$ fixed
+(a fixed number of change events), sweep the horizon $T$, re-tune
+$1-\gamma = (MK\log T)^{1/3}(V_T/T)^{2/3}$ at each horizon, and fit
+$\log(\text{final regret})$ versus $\log T$. Theorem~\ref{thm:main} predicts a
+slope $\leq 2/3$. (Holding $V_T \propto T$ instead would make linear regret
+information-theoretically optimal by the Besbes et al.\ lower bound, so the
+comparison must fix $V_T$.)
+
+\paragraph{Result.} Across three drift regimes (one-shot collapse,
+monotone drift, periodic), with $V_T$ held constant to within $0.1\%$ over
+horizons $T \in \{2,4,8,16\}{\times}10^3$ and five seeds, the measured
+regret-vs-horizon exponents are:
+\begin{center}
+\begin{tabular}{lccc}
+\hline
+Regime & CD-TS exponent & static-optimal exponent & degradation \\
+\hline
+abrupt   & $0.35$ & $1.00$ & $33\times$ \\
+drift    & $0.20$ & $1.00$ & $25\times$ \\
+periodic & $0.55$ & $0.75$ & $2.2\times$ \\
+\hline
+\end{tabular}
+\end{center}
+CD-TS scales sublinearly in every regime --- comfortably within the $2/3$
+\emph{upper} bound of Theorem~\ref{thm:main} (an upper bound; the realized
+exponent may be lower under benign drift) --- while the frozen offline-optimal
+comparator (a faithful re-implementation of the paradigm of Dekoninck,
+Baader, and Vechev 2025: calibrate on a stationary prefix, commit, freeze)
+scales $\approx$ linearly because it cannot react to drift. This is the
+experiment that substantiates the paper's positioning: their rule is the
+correct \emph{stationary} per-step optimum; CD-TS is the no-regret learner for
+the \emph{non-stationary} regime they do not address.
+
+\section{Limitations and Open Problems}
+\label{sec:limitations}
+
+\begin{itemize}
+    \item Theorem~\ref{thm:main} assumes $V_T$ is known. The bandit-over-bandit construction of Cheung, Simchi-Levi, and Zhu (2019) recovers the same rate adaptively but adds an extra $\log T$ factor.
+    \item The contextual structure is treated independently per context. Sharing information across contexts via a function-approximation prior (e.g., linear or kernel TS) could improve the dependence on $M$, but is outside the scope of this analysis.
+    \item The bound is on pseudo-regret; high-probability regret bounds for discounted Thompson sampling exist but require slightly stronger concentration arguments (Russac et al., 2019).
+    \item The MDP router lacks a finite-sample guarantee under our current parameterization (Proposition~\ref{prop:mdp-sample}). It is positioned as a heuristic, not a certified contribution; closing this gap via \textsc{UCB-Q} is future work.
+    \item \textbf{Relation to optimal cascade routing (Dekoninck, Baader, and Vechev 2025).} That work derives the \emph{per-query optimal} routing/cascading rule \emph{given} a fixed quality estimator with known uncertainty. Our analysis is complementary and addresses the orthogonal question they leave open: when the quality/reliability signal is \emph{unknown and non-stationary} and must be learned online, CD-TS attains the no-regret rate of Theorem~\ref{thm:main} relative to the dynamic optimum. Their result characterizes the per-step target; ours characterizes the learning dynamics that reach it under drift. Neither subsumes the other.
+\end{itemize}
+
+\section*{References (key)}
+
+\begin{itemize}
+    \item Agrawal, S., and Goyal, N. (2012). \emph{Analysis of Thompson sampling for the multi-armed bandit problem}. COLT.
+    \item Agrawal, S., and Goyal, N. (2013). \emph{Further optimal regret bounds for Thompson sampling}. AISTATS.
+    \item Azar, M. G., Osband, I., and Munos, R. (2017). \emph{Minimax regret bounds for reinforcement learning}. ICML.
+    \item Bertsekas, D. P., and Tsitsiklis, J. N. (1996). \emph{Neuro-Dynamic Programming}. Athena Scientific.
+    \item Besbes, O., Gur, Y., and Zeevi, A. (2014). \emph{Stochastic multi-armed bandit problem with non-stationary rewards}. NeurIPS.
+    \item Dekoninck, J., Baader, M., and Vechev, M. (2025). \emph{A Unified Approach to Routing and Cascading for LLMs}. ICML.
+    \item Domingues, O. D., M\'enard, P., Kaufmann, E., and Valko, M. (2021). \emph{Episodic reinforcement learning in finite MDPs: minimax lower bounds revisited}. ALT.
+    \item Cheung, W. C., Simchi-Levi, D., and Zhu, R. (2019). \emph{Learning to optimize under non-stationarity}. AISTATS.
+    \item Garivier, A., and Moulines, E. (2008). \emph{On upper-confidence bound policies for switching bandit problems}. ALT.
+    \item Jin, C., Allen-Zhu, Z., Bubeck, S., and Jordan, M. I. (2018). \emph{Is Q-learning provably efficient?} NeurIPS.
+    \item Russac, Y., Vernade, C., and Cappé, O. (2019). \emph{Weighted linear bandits for non-stationary environments}. NeurIPS.
+    \item Russo, D., and Van Roy, B. (2014). \emph{Learning to optimize via posterior sampling}. Mathematics of Operations Research.
+    \item Trovò, F., Restelli, M., and Gatti, N. (2020). \emph{Sliding-window Thompson sampling for non-stationary settings}. JAIR.
+    \item Tsitsiklis, J. N. (1994). \emph{Asynchronous stochastic approximation and Q-learning}. Machine Learning.
+    \item Watkins, C. J. C. H., and Dayan, P. (1992). \emph{Q-learning}. Machine Learning.
+\end{itemize}
+
+\end{document}

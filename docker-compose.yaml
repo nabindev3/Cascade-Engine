@@ -1,0 +1,57 @@
+version: "3.9"
+
+services:
+  # Redis for Caching Layer
+  redis:
+    image: "redis:alpine"
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Python core inference service
+  core:
+    build:
+      context: .
+      dockerfile: ./python_core/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - CASCADE_MID_API_KEY=${CASCADE_MID_API_KEY:-}
+      - CASCADE_PREMIUM_API_KEY=${CASCADE_PREMIUM_API_KEY:-}
+      - CASCADE_LOCAL_URL=http://host.docker.internal:11434
+      - REDIS_URL=redis://redis:6379/0
+      - PYTHONPATH=/app
+    volumes:
+      - ./data/logs:/app/data/logs
+      - ./config.yaml:/app/config.yaml:ro
+      - .:/app
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # TypeScript API gateway
+  gateway:
+    build:
+      context: ./typescript_api
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - CORE_SERVICE_URL=http://core:8000
+      - API_KEYS=${API_KEYS:-dev-key-123}
+      - GATEWAY_PORT=3000
+    depends_on:
+      core:
+        condition: service_healthy
+
+volumes:
+  logs:

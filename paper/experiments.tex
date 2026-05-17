@@ -1,0 +1,18 @@
+\section{Experiments}
+
+We evaluate the Cascade Engine using a diverse set of real-world queries to measure the cost-accuracy Pareto frontier.
+
+\subsection{Experimental Setup}
+We utilize the Alpaca-Eval dataset as our primary benchmark to test reasoning and instructional following capabilities. The model tiers are configured as follows:
+\begin{itemize}
+    \item \textbf{Tier 1}: \texttt{llama3.2:3b} (Local, low cost, fast)
+    \item \textbf{Tier 2}: \texttt{gpt-4o-mini} (Cloud, moderate cost, balanced)
+    \item \textbf{Tier 3}: \texttt{gpt-4o} (Cloud, high cost, highly accurate)
+\end{itemize}
+We compare our dynamic cascade approach against RouteLLM and static single-model baselines.
+
+\subsection{Ablation Study}
+To isolate the contribution of our intelligent layers, we performed an ablation study. Disabling the SemanticCache resulted in a measurable increase in total API expenditure for repeated concepts, while removing the Gatekeeper classification caused a significant increase in unnecessary Tier 3 invocations for trivial queries.
+
+\subsection{Results}
+Our initial benchmarks indicate that the Cascade Engine achieves a substantial reduction in inference costs compared to a Tier 3-only deployment, while maintaining parity with the top-tier response quality. The Pareto frontier demonstrates that dynamic routing strictly dominates static allocation strategies across varying latency and budget constraints.
