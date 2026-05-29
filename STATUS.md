@@ -48,7 +48,7 @@ except the credential-gated RouteLLM tests.
 | 11 | Real NLP/serving benchmarks | ✅ **Already done** | `data_loader.load_prompt_workload` loads any HF dataset (alpaca_eval default; pass `dataset_name="gsm8k"` / `"cais/mmlu"` for those). Reward-model scoring, multi-seed t-CIs, Pareto frontier all present. |
 | 12 | High-fidelity API replay + drift simulator | 🟡 Partial | The controlled non-stationary env exists; recording/replaying *real* engine responses with injected drift is not yet built. |
 | 13 | Open-source packaging (pip/npm + CI) | ⬜ Not started | Engineering: `pyproject.toml`, GitHub Actions, docs. |
-| 14 | LaTeX polish + appendix proofs | 🟡 Partial | `paper/` (theory.tex, main.tex, related_work.tex) exists; would now need a subsection + experiment for adaptive drift (Step 3) and LinTS (Step 2). |
+| 14 | LaTeX polish + appendix proofs | 🟡 Partial | The adaptive-drift result (Step 3) is now written into **both** `paper/main.tex` (new §"Adaptive Drift Tracking Without a Known $V_T$": Algorithms 2–3, Remark, Table comparing Adaptive vs oracle CD-TS vs static; abstract + contributions + limitations updated) and `paper/theory.tex`, with four new bib entries. Still open: a LinTS (Step 2) subsection + the semantic-embedding experiment. |
 | 15 | Submission / arXiv / networking | ⬜ Not started | Strategy: ENLSP workshop or MLSys/ICML/NeurIPS full paper. |
 
 Legend: ✅ done · 🟡 partial · ⬜ not started.
@@ -118,9 +118,11 @@ cd typescript_api && npm install && npm test
 
 ## Recommended next steps (highest leverage first)
 
-1. **Paper integration (Step 14, partial).** Add a LinTS subsection (Step 2) and
-   an adaptive-drift subsection + figure (Step 3) to `paper/theory.tex`. The
-   adaptive-drift result above is the strongest new story.
+1. **Paper integration (Step 14, partial).** ✅ The adaptive-drift section
+   (Step 3) is now in `main.tex` and `theory.tex`. Remaining: a LinTS
+   subsection (Step 2) and the semantic-embedding experiment; optionally a
+   scaling figure that also plots the `adaptive_cd_ts` curve (the result is
+   currently presented as a table).
 2. **Semantic LinTS experiment (Step 2, extend).** Run the benchmark with
    `make_embedding_feature_fn("all-MiniLM-L6-v2")` and report LinTS vs. tabular
    Thompson on the Pareto frontier — quantifies the generalization benefit.

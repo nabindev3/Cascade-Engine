@@ -99,7 +99,7 @@ The repository previously decayed \emph{all} arms uniformly each step (\texttt{l
 The variation $V_T$ defined in \eqref{eq:variation-budget} is finite and known to the algorithm at training time.
 \end{assumption}
 
-When $V_T$ is not known, an adaptive ``bandit-over-bandit'' meta-algorithm (Cheung, Simchi-Levi, and Zhu, 2019) recovers the same rate up to logarithmic factors.
+When $V_T$ is not known, an adaptive ``bandit-over-bandit'' meta-algorithm (Cheung, Simchi-Levi, and Zhu, 2019) recovers the same rate up to logarithmic factors. We additionally give a simpler, deployable $V_T$-free policy --- detect-and-restart Adaptive CD-TS --- in \S\ref{sec:adaptive}, and show empirically that it matches the oracle-tuned $\gamma$ schedule without ever observing $V_T$.
 
 \begin{theorem}[Regret of CD-TS in the non-stationary contextual setting]
 \label{thm:main}
@@ -325,11 +325,140 @@ experiment that substantiates the paper's positioning: their rule is the
 correct \emph{stationary} per-step optimum; CD-TS is the no-regret learner for
 the \emph{non-stationary} regime they do not address.
 
+\section{Adaptive Drift Tracking Without a Known Variation Budget}
+\label{sec:adaptive}
+
+Theorem~\ref{thm:main} requires the variation budget $V_T$ at training time
+(Assumption~\ref{ass:budget}) in order to set the discount $\gamma$. In a
+production router $V_T$ is rarely known a priori: drift comes from outages,
+deprecations, and load patterns whose magnitude and frequency are not given in
+advance. The bandit-over-bandit construction of Cheung, Simchi-Levi, and Zhu
+(2019) removes the assumption with a matching $\widetilde{O}(V_T^{1/3}T^{2/3})$
+rate but at the cost of an outer meta-bandit over a grid of discount factors.
+We adopt a simpler, deployable alternative that needs no $V_T$ and adds no
+meta-bandit: \emph{detect-and-restart}.
+
+\subsection{Algorithm: Adaptive CD-TS}
+
+The idea is to separate the two kinds of drift the bound lumps into a single
+$V_T$. \emph{Gradual} drift (slow quality regression, diurnal load) is absorbed
+by a mild, fixed geometric discount $\gamma_0$ close to $1$. \emph{Abrupt}
+breaks (a tier collapses or is deprecated) are caught by a per-arm change
+detector that, on an alarm, restarts that arm's posterior so stale pre-break
+evidence is discarded immediately rather than being slowly forgotten by the
+discount. The detector is a two-sided CUSUM (the cumulative form of the
+Page--Hinkley test; Page 1954, Hinkley 1971) of the type used for
+piecewise-stationary bandits by Liu, Lee, and Shroff (2018) and Cao, Wen,
+Kveton, and Xie (2019).
+
+\begin{algorithm}[h]
+\caption{Two-sided CUSUM change detector (per arm)}
+\label{alg:cusum}
+\begin{algorithmic}[1]
+\Require warmup $w$; slack $\delta > 0$; threshold $\Lambda > 0$.
+\State $n \gets 0$, $\hat{\mu}_0 \gets 0$, $g^+ \gets 0$, $g^- \gets 0$.
+\Function{Update}{$x$} \Comment{$x \in [0,1]$ is the latest reward on this arm}
+    \State $n \gets n + 1$
+    \If{$n \leq w$} \Comment{estimate a stable reference mean}
+        \State $\hat{\mu}_0 \gets \hat{\mu}_0 + (x - \hat{\mu}_0)/n$; \quad \Return \textsc{false}
+    \EndIf
+    \State $g^+ \gets \max\{0,\; g^+ + (x - \hat{\mu}_0) - \delta\}$
+    \State $g^- \gets \max\{0,\; g^- - (x - \hat{\mu}_0) - \delta\}$
+    \State \Return $\big(g^+ > \Lambda\big) \vee \big(g^- > \Lambda\big)$
+\EndFunction
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[h]
+\caption{Adaptive CD-TS (no $V_T$)}
+\label{alg:adaptive}
+\begin{algorithmic}[1]
+\Require mild discount $\gamma_0 \in (0,1)$ (e.g.\ $0.999$); detector parameters $(w,\delta,\Lambda)$; floor $\eta$.
+\State Initialize $\Beta(1,1)$ posteriors and one detector (Alg.~\ref{alg:cusum}) per $(x,a)$.
+\For{$t = 1,\dots,T$}
+    \State Sample, play $a_t \gets \argmax_a \theta_{x_t,a,t}$, and observe $r_t$ as in Algorithm~\ref{alg:cd-ts}.
+    \If{detector$(x_t,a_t)$.\textsc{Update}$(r_t)$ fires}
+        \State Reset posterior $(\alpha_{x_t,a_t},\beta_{x_t,a_t}) \gets (1,1)$ and reset the detector. \Comment{discard stale evidence}
+    \Else
+        \State Apply the discounted Bernoulli-trick update of Algorithm~\ref{alg:cd-ts} with $\gamma = \gamma_0$.
+    \EndIf
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+\begin{remark}[Why this needs no $V_T$]
+\label{rem:no-vt}
+The detector parameters $(w,\delta,\Lambda)$ and the mild discount $\gamma_0$
+are \emph{fixed constants} that do not depend on $V_T$ or $T$. For $\{0,1\}$
+(Bernoulli) rewards, $\delta$ is chosen larger than the per-step noise scale so
+the CUSUM statistic has negative drift under no change (giving an average run
+length to false alarm exponentially large in $\Lambda$), while a mean shift of
+magnitude $\gtrsim 2\delta$ produces positive drift and is detected in
+$O(\Lambda/(\text{shift}-\delta))$ steps. We use $w=50$, $\delta=0.2$,
+$\Lambda=12$, which gives a false-alarm rate $\approx 0.02$ per $3000$ rounds
+and detects a collapse of mean reward by $\geq 0.4$ within a few dozen rounds.
+Because the reset, not the discount, handles abrupt breaks, $\gamma_0$ can be
+kept very close to $1$, so almost no information is thrown away during the long
+stationary stretches between breaks. This is exactly the regime in which the
+fixed-$\gamma$ schedule of Theorem~\ref{thm:main} is forced to compromise.
+\end{remark}
+
+\subsection{Empirical result: matching the oracle-tuned policy with no $V_T$}
+
+We rerun the cross-horizon protocol of \S\ref{sec:empirical} with
+Algorithm~\ref{alg:adaptive} added as a comparator. Crucially, CD-TS receives
+the $V_T$-optimal $\gamma$ from Theorem~\ref{thm:main} (an oracle it cannot have
+in practice), whereas Adaptive CD-TS receives \emph{no} $V_T$ and uses the fixed
+constants of Remark~\ref{rem:no-vt}. Horizons $T \in \{2,4,8,16\}{\times}10^3$,
+five seeds, $V_T$ held fixed across horizons.
+
+\begin{center}
+\begin{tabular}{l ccc c ccc}
+\hline
+ & \multicolumn{3}{c}{regret-vs-horizon exponent} & & \multicolumn{3}{c}{final regret $R_T$ at $T{=}16\mathrm{k}$} \\
+\cline{2-4}\cline{6-8}
+Regime & CD-TS$^\dagger$ & \textbf{Adaptive} & static & & CD-TS$^\dagger$ & \textbf{Adaptive} & static \\
+\hline
+abrupt   & $0.35$ & $\mathbf{0.07}$ & $1.00$ & & $104$ & $\mathbf{46}$  & $3473$ \\
+drift    & $0.20$ & $0.60$ & $1.00$ & & $84$  & $83$  & $2136$ \\
+periodic & $0.55$ & $\mathbf{0.45}$ & $1.00$ & & $163$ & $\mathbf{94}$  & $351$ \\
+\hline
+\end{tabular}
+\end{center}
+{\small $^\dagger$CD-TS is given the $V_T$-optimal discount (oracle); Adaptive CD-TS is not.}
+
+Adaptive CD-TS is sublinear in every regime and, despite never observing $V_T$,
+\textbf{matches or beats the oracle-tuned CD-TS on final dynamic regret in all
+three regimes} (it is tied under monotone drift and lower under the abrupt and
+periodic regimes), while the frozen offline-optimal comparator remains
+$\approx$ linear. The advantage is largest exactly where the fixed-$\gamma$
+schedule is most strained: under an abrupt collapse, the detector restarts the
+collapsed arm within a few dozen rounds, so the post-break per-round regret in
+the final tenth of the horizon falls to $\approx 6\times 10^{-4}$ (versus
+$\approx 4\times 10^{-3}$ for oracle CD-TS and $0.35$ for the frozen policy).
+The drift exponent fit is noisier (lower $R^2$) because the adaptive policy's
+absolute regret is small and dominated by detection-delay constants rather than
+a clean power law; the final-regret column, which is assumption-free, is the
+more reliable summary there. The experiment is implemented in
+\texttt{python\_core/router/nonstationary.py}
+(\texttt{CUSUMDetector}, \texttt{AdaptiveCDTSPolicy}) and unit-tested in
+\texttt{test\_nonstationary.py}.
+
+\begin{remark}[Scope]
+Algorithm~\ref{alg:adaptive} is an empirically validated, $V_T$-free policy, not
+a new upper bound: a worst-case regret guarantee for detect-and-restart Thompson
+sampling would follow the change-detection analyses of Liu et al.\ (2018) and
+Cao et al.\ (2019) under a piecewise-stationary model with a minimum
+segment-length assumption, and is left as future work. Its purpose here is to
+discharge the practically objectionable part of Assumption~\ref{ass:budget}
+without the overhead of a bandit-over-bandit meta-learner.
+\end{remark}
+
 \section{Limitations and Open Problems}
 \label{sec:limitations}
 
 \begin{itemize}
-    \item Theorem~\ref{thm:main} assumes $V_T$ is known. The bandit-over-bandit construction of Cheung, Simchi-Levi, and Zhu (2019) recovers the same rate adaptively but adds an extra $\log T$ factor.
+    \item Theorem~\ref{thm:main} assumes $V_T$ is known. The bandit-over-bandit construction of Cheung, Simchi-Levi, and Zhu (2019) recovers the same rate adaptively but adds an extra $\log T$ factor. \S\ref{sec:adaptive} removes the assumption in practice with detect-and-restart (Algorithm~\ref{alg:adaptive}), which matches the oracle-tuned policy empirically (no $V_T$); a worst-case bound for that policy under a minimum-segment-length model is open and would follow Liu et al.\ (2018) / Cao et al.\ (2019).
     \item The contextual structure is treated independently per context. Sharing information across contexts via a function-approximation prior (e.g., linear or kernel TS) could improve the dependence on $M$, but is outside the scope of this analysis.
     \item The bound is on pseudo-regret; high-probability regret bounds for discounted Thompson sampling exist but require slightly stronger concentration arguments (Russac et al., 2019).
     \item The MDP router lacks a finite-sample guarantee under our current parameterization (Proposition~\ref{prop:mdp-sample}). It is positioned as a heuristic, not a certified contribution; closing this gap via \textsc{UCB-Q} is future work.
@@ -344,11 +473,15 @@ the \emph{non-stationary} regime they do not address.
     \item Azar, M. G., Osband, I., and Munos, R. (2017). \emph{Minimax regret bounds for reinforcement learning}. ICML.
     \item Bertsekas, D. P., and Tsitsiklis, J. N. (1996). \emph{Neuro-Dynamic Programming}. Athena Scientific.
     \item Besbes, O., Gur, Y., and Zeevi, A. (2014). \emph{Stochastic multi-armed bandit problem with non-stationary rewards}. NeurIPS.
+    \item Cao, Y., Wen, Z., Kveton, B., and Xie, Y. (2019). \emph{Nearly optimal adaptive procedure with change detection for piecewise-stationary bandit}. AISTATS.
     \item Dekoninck, J., Baader, M., and Vechev, M. (2025). \emph{A Unified Approach to Routing and Cascading for LLMs}. ICML.
     \item Domingues, O. D., M\'enard, P., Kaufmann, E., and Valko, M. (2021). \emph{Episodic reinforcement learning in finite MDPs: minimax lower bounds revisited}. ALT.
     \item Cheung, W. C., Simchi-Levi, D., and Zhu, R. (2019). \emph{Learning to optimize under non-stationarity}. AISTATS.
     \item Garivier, A., and Moulines, E. (2008). \emph{On upper-confidence bound policies for switching bandit problems}. ALT.
+    \item Hinkley, D. V. (1971). \emph{Inference about the change-point from cumulative sum tests}. Biometrika.
     \item Jin, C., Allen-Zhu, Z., Bubeck, S., and Jordan, M. I. (2018). \emph{Is Q-learning provably efficient?} NeurIPS.
+    \item Liu, F., Lee, J., and Shroff, N. (2018). \emph{A change-detection based framework for piecewise-stationary multi-armed bandit problem}. AAAI.
+    \item Page, E. S. (1954). \emph{Continuous inspection schemes}. Biometrika.
     \item Russac, Y., Vernade, C., and Cappé, O. (2019). \emph{Weighted linear bandits for non-stationary environments}. NeurIPS.
     \item Russo, D., and Van Roy, B. (2014). \emph{Learning to optimize via posterior sampling}. Mathematics of Operations Research.
     \item Trovò, F., Restelli, M., and Gatti, N. (2020). \emph{Sliding-window Thompson sampling for non-stationary settings}. JAIR.
