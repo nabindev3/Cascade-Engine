@@ -15,9 +15,9 @@ Research extensions (Paper 2):
 
 import asyncio
 import time
-import uuid
-from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Any, Optional, Tuple
+
+from pydantic import BaseModel, Field
 
 from ..engines.base import (
     BaseEngine,
@@ -28,13 +28,12 @@ from ..engines.base import (
 )
 
 
-@dataclass
-class RoutingDecision:
+class RoutingDecision(BaseModel):
     """Records the router's decision path for a single request — key for Paper 1 data."""
     request_id: str
-    tiers_attempted: List[int] = field(default_factory=list)
-    engines_tried: List[str] = field(default_factory=list)
-    escalation_reasons: List[str] = field(default_factory=list)
+    tiers_attempted: list[int] = Field(default_factory=list)
+    engines_tried: list[str] = Field(default_factory=list)
+    escalation_reasons: list[str] = Field(default_factory=list)
     final_engine: Optional[str] = None
     final_tier: Optional[int] = None
     total_latency_ms: float = 0.0
@@ -42,8 +41,7 @@ class RoutingDecision:
     success: bool = False
 
 
-@dataclass
-class RouterConfig:
+class RouterConfig(BaseModel):
     """
     Configuration for the cascade router.
 
@@ -56,7 +54,7 @@ class RouterConfig:
     min_reliability_to_attempt: float — skip engine if reliability below this.
     enable_parallel_fallback: bool — if True, fire next tier in parallel on low confidence.
     """
-    confidence_thresholds: dict = field(default_factory=lambda: {1: 0.65, 2: 0.80})
+    confidence_thresholds: dict[int, float] = Field(default_factory=lambda: {1: 0.65, 2: 0.80})
     max_cost_per_request: float = 0.05  # $0.05 default ceiling
     reliability_ema_alpha: float = 0.1
     min_reliability_to_attempt: float = 0.3
@@ -72,16 +70,16 @@ class CascadeRouter:
     until a sufficiently confident response is obtained or all tiers are exhausted.
     """
 
-    def __init__(self, engines: List[BaseEngine], config: RouterConfig = None):
-        self.config = config or RouterConfig()
+    def __init__(self, engines: list[BaseEngine], config: Optional[RouterConfig] = None) -> None:
+        self.config: RouterConfig = config or RouterConfig()
         # Sort engines by tier (ascending = cheapest first)
-        self.engines = sorted(engines, key=lambda e: e.tier)
+        self.engines: list[BaseEngine] = sorted(engines, key=lambda e: e.tier)
         # Reliability EMA per engine
         self._reliability_ema: dict[str, float] = {
             e.engine_id: 1.0 for e in self.engines
         }
 
-    async def route(self, request: InferenceRequest) -> tuple[InferenceResponse, RoutingDecision]:
+    async def route(self, request: InferenceRequest) -> Tuple[InferenceResponse, RoutingDecision]:
         """
         Route a request through the cascade.
 
@@ -89,12 +87,12 @@ class CascadeRouter:
             (best_response, routing_decision) — even on total failure,
             returns the last response attempted.
         """
-        decision = RoutingDecision(request_id=request.request_id)
-        start = time.perf_counter()
+        decision: RoutingDecision = RoutingDecision(request_id=request.request_id)
+        start: float = time.perf_counter()
 
         best_response: Optional[InferenceResponse] = None
-        cumulative_cost = 0.0
-        is_escalated = False
+        cumulative_cost: float = 0.0
+        is_escalated: bool = False
 
         for engine in self.engines:
             # --- Gate 1: Minimum tier constraint ---
@@ -109,7 +107,7 @@ class CascadeRouter:
                 continue
 
             # --- Gate 3: Reliability threshold ---
-            ema = self._reliability_ema.get(engine.engine_id, 1.0)
+            ema: float = self._reliability_ema.get(engine.engine_id, 1.0)
             if ema < self.config.min_reliability_to_attempt:
                 decision.escalation_reasons.append(
                     f"{engine.engine_id}: reliability too low ({ema:.2f})"
@@ -117,7 +115,7 @@ class CascadeRouter:
                 continue
 
             # --- Gate 4: Cost budget ---
-            estimated = engine.estimated_cost(request)
+            estimated: float = engine.estimated_cost(request)
             if request.max_cost and (cumulative_cost + estimated) > request.max_cost:
                 decision.escalation_reasons.append(
                     f"{engine.engine_id}: would exceed request budget"
@@ -133,7 +131,7 @@ class CascadeRouter:
             decision.tiers_attempted.append(engine.tier)
             decision.engines_tried.append(engine.engine_id)
 
-            response = await engine.infer(request)
+            response: InferenceResponse = await engine.predict(request)
             cumulative_cost += response.cost_usd
 
             # Update reliability EMA
@@ -150,7 +148,7 @@ class CascadeRouter:
                 continue
 
             # Check confidence against tier threshold
-            threshold = self.config.confidence_thresholds.get(engine.tier, 0.0)
+            threshold: float = self.config.confidence_thresholds.get(engine.tier, 0.0)
             
             # Critic Model Mock (Confidence Scoring)
             if response.confidence < threshold and response.confidence > 0.1:
@@ -192,28 +190,26 @@ class CascadeRouter:
 
         return best_response, decision
 
-    def _update_reliability(self, engine_id: str, success: bool):
+    def _update_reliability(self, engine_id: str, success: bool) -> None:
         """Exponential moving average of success rate."""
-        alpha = self.config.reliability_ema_alpha
-        current = self._reliability_ema.get(engine_id, 1.0)
-        observation = 1.0 if success else 0.0
+        alpha: float = self.config.reliability_ema_alpha
+        current: float = self._reliability_ema.get(engine_id, 1.0)
+        observation: float = 1.0 if success else 0.0
         self._reliability_ema[engine_id] = alpha * observation + (1 - alpha) * current
 
-    def get_engine_stats(self) -> dict:
-        """Return current engine status and reliability for monitoring."""
+    def get_engine_stats(self) -> dict[str, dict[str, Any]]:
+        """Return structured engine performance statistics."""
         return {
-            engine.engine_id: {
-                "tier": engine.tier,
-                "status": engine.status.value,
-                "reliability_ema": round(self._reliability_ema.get(engine.engine_id, 0), 4),
-                "empirical_reliability": round(engine.reliability, 4),
-                "total_calls": engine._total_calls,
-                "consecutive_failures": engine._consecutive_failures,
+            e.engine_id: {
+                "tier": e.tier,
+                "status": e.status.value,
+                "reliability": e.reliability,
+                "reliability_ema": self._reliability_ema.get(e.engine_id, 1.0),
             }
-            for engine in self.engines
+            for e in self.engines
         }
 
-    async def health_check_all(self) -> dict:
+    async def health_check_all(self) -> dict[str, str]:
         """Probe all engines and return their status."""
         results = await asyncio.gather(
             *[engine.health_check() for engine in self.engines],

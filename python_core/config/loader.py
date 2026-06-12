@@ -4,16 +4,18 @@ Configuration loader — reads YAML config and merges with environment variables
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 # Use pyyaml if available, fall back to a simple parser
+yaml: Any = None
 try:
-    import yaml
+    import yaml as _yaml
+    yaml = _yaml
 except ImportError:
-    yaml = None
+    pass
 
 
-DEFAULT_CONFIG = {
+DEFAULT_CONFIG: dict[str, Any] = {
     "engines": {
         "local": {
             "enabled": True,
@@ -55,27 +57,28 @@ DEFAULT_CONFIG = {
 }
 
 
-def load_config(config_path: str = None) -> dict:
+def load_config(config_path: Optional[str] = None) -> dict[str, Any]:
     """
     Load configuration with priority:
     1. Environment variables (highest)
     2. Config file (YAML)
     3. Default config (lowest)
     """
-    config = _deep_copy(DEFAULT_CONFIG)
+    config: dict[str, Any] = _deep_copy(DEFAULT_CONFIG)
 
     # Load from YAML file if it exists
     if config_path is None:
         config_path = os.environ.get("CASCADE_CONFIG", "./config.yaml")
 
-    path = Path(config_path)
-    if path.exists() and yaml:
-        with open(path) as f:
-            file_config = yaml.safe_load(f) or {}
-        config = _deep_merge(config, file_config)
+    if config_path is not None:
+        path = Path(config_path)
+        if path.exists() and yaml:
+            with open(path) as f:
+                file_config: dict[str, Any] = yaml.safe_load(f) or {}
+            config = _deep_merge(config, file_config)
 
     # Override with environment variables
-    env_overrides = {
+    env_overrides: dict[str, tuple[str, ...]] = {
         "CASCADE_LOCAL_URL": ("engines", "local", "base_url"),
         "CASCADE_LOCAL_MODEL": ("engines", "local", "model"),
         "CASCADE_MID_API_KEY": ("engines", "mid", "api_key"),
@@ -89,16 +92,16 @@ def load_config(config_path: str = None) -> dict:
     }
 
     for env_var, key_path in env_overrides.items():
-        value = os.environ.get(env_var)
+        value: Optional[str] = os.environ.get(env_var)
         if value is not None:
             _set_nested(config, key_path, _coerce_value(value))
 
     return config
 
 
-def _deep_copy(d: dict) -> dict:
+def _deep_copy(d: dict[str, Any]) -> dict[str, Any]:
     """Simple deep copy for nested dicts."""
-    result = {}
+    result: dict[str, Any] = {}
     for k, v in d.items():
         if isinstance(v, dict):
             result[k] = _deep_copy(v)
@@ -109,9 +112,9 @@ def _deep_copy(d: dict) -> dict:
     return result
 
 
-def _deep_merge(base: dict, override: dict) -> dict:
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     """Recursively merge override into base."""
-    result = _deep_copy(base)
+    result: dict[str, Any] = _deep_copy(base)
     for k, v in override.items():
         if k in result and isinstance(result[k], dict) and isinstance(v, dict):
             result[k] = _deep_merge(result[k], v)
@@ -120,7 +123,7 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return result
 
 
-def _set_nested(d: dict, keys: tuple, value: Any):
+def _set_nested(d: dict[str, Any], keys: tuple[str, ...], value: Any) -> None:
     """Set a value in a nested dict by key path."""
     for key in keys[:-1]:
         d = d.setdefault(key, {})
@@ -135,3 +138,4 @@ def _coerce_value(value: str) -> Any:
         return float(value) if "." in value else int(value)
     except ValueError:
         return value
+

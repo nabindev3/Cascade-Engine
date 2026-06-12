@@ -24,13 +24,13 @@ from python_core.engines.base import (
 class FakeEngine(BaseEngine):
     """Deterministic engine for tests. Quality and cost scale with tier."""
 
-    def __init__(self, engine_id: str, tier: int, confidence: float = 0.9, cost_per_call: float = 0.001):
+    def __init__(self, engine_id: str, tier: int, confidence: float = 0.9, cost_per_call: float = 0.001) -> None:
         super().__init__(engine_id=engine_id, tier=tier, config={})
-        self._confidence = confidence
-        self._cost_per_call = cost_per_call
+        self._confidence: float = confidence
+        self._cost_per_call: float = cost_per_call
         self.calls: list[str] = []
 
-    async def infer(self, request: InferenceRequest) -> InferenceResponse:
+    async def predict(self, request: InferenceRequest) -> InferenceResponse:
         self.calls.append(request.prompt)
         return InferenceResponse(
             request_id=request.request_id,
@@ -52,7 +52,7 @@ class FakeEngine(BaseEngine):
 
 
 @pytest.fixture
-def fake_engines():
+def fake_engines() -> list[BaseEngine]:
     return [
         FakeEngine("local-tier1", tier=1, confidence=0.6, cost_per_call=0.0001),
         FakeEngine("mid-tier2", tier=2, confidence=0.8, cost_per_call=0.001),
@@ -61,5 +61,6 @@ def fake_engines():
 
 
 @pytest.fixture
-def simple_request():
+def simple_request() -> InferenceRequest:
     return InferenceRequest(request_id="test-001", prompt="What is the capital of France?")
+

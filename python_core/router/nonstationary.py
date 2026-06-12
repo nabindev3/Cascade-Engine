@@ -41,7 +41,7 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .learned_router import ArmStats
 
@@ -176,12 +176,12 @@ class StaticOptimalPolicy(Policy):
     optimum' reduces to 'best calibrated mean'."""
     name = "static_optimal"
 
-    def __init__(self, K: int, calib_rounds: int):
+    def __init__(self, K: int, calib_rounds: int) -> None:
         self.K = K
         self.calib_rounds = calib_rounds
         self._sum = [0.0] * K
         self._n = [0] * K
-        self._frozen_arm = None
+        self._frozen_arm: Optional[int] = None
 
     def select(self, t: int) -> int:
         if t < self.calib_rounds:
@@ -192,6 +192,7 @@ class StaticOptimalPolicy(Policy):
                 for i in range(self.K)
             ]
             self._frozen_arm = max(range(self.K), key=lambda i: means[i])
+        assert self._frozen_arm is not None
         return self._frozen_arm
 
     def update(self, arm: int, reward: float) -> None:
@@ -408,9 +409,9 @@ def run_single_horizon(
     If `cdts_gamma` is None it is set per Theorem 1 from the env's V_T.
     """
     policy_names = ["cd_ts", "adaptive_cd_ts", "static_optimal", "round_robin"]
-    curves = {p: [] for p in policy_names}
-    finals = {p: [] for p in policy_names}
-    tail_rate = {p: [] for p in policy_names}
+    curves: dict[str, list[list[float]]] = {p: [] for p in policy_names}
+    finals: dict[str, list[float]] = {p: [] for p in policy_names}
+    tail_rate: dict[str, list[float]] = {p: [] for p in policy_names}
 
     sample_env = env_factory()
     V_T = sample_env.total_variation()
@@ -480,8 +481,11 @@ def run_horizon_scaling(
     v_budgets: List[float] = []
 
     for T in horizons:
+        def _make_env() -> NonStationaryEnv:
+            return env_factory_at(T)
+
         res = run_single_horizon(
-            env_factory=lambda T=T: env_factory_at(T),
+            env_factory=_make_env,
             T=T, n_seeds=n_seeds, cdts_gamma=None, calib_frac=calib_frac,
         )
         per_T[T] = {

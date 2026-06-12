@@ -7,11 +7,12 @@ Runs on port 8000 by default.
 
 import uuid
 from contextlib import asynccontextmanager
+from typing import Any, AsyncGenerator
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from .engines.base import InferenceRequest
+from .engines.base import BaseEngine, InferenceRequest
 from .engines.local_engine import OllamaEngine
 from .engines.cloud_engine import create_mid_tier_engine, create_premium_engine
 from .router.cascade_router import CascadeRouter, RouterConfig
@@ -58,13 +59,13 @@ logger_instance: EventLogger | None = None
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     global router_instance, logger_instance
 
     config = load_config()
 
     # Build engines from config
-    engines = []
+    engines: list[BaseEngine] = []
 
     if config.get("engines", {}).get("local", {}).get("enabled", True):
         engines.append(OllamaEngine(config=config.get("engines", {}).get("local", {})))
@@ -103,12 +104,13 @@ app = FastAPI(
 )
 
 
+
 # ─── Endpoints ─────────────────────────────────────────────────────────────────
 
 
 @app.post("/infer", response_model=InferResponse)
 @instrument_inference
-async def infer(req: InferRequest):
+async def infer(req: InferRequest) -> InferResponse:
     """Run inference through the adaptive cascade."""
     if not router_instance:
         raise HTTPException(status_code=503, detail="Router not initialized")
@@ -150,7 +152,7 @@ async def infer(req: InferRequest):
 
 
 @app.get("/health")
-async def health():
+async def health() -> dict[str, Any]:
     """Health check for all engines."""
     if not router_instance:
         return {"status": "not_initialized"}
@@ -159,9 +161,9 @@ async def health():
 
 
 @app.get("/stats")
-async def stats():
+async def stats() -> dict[str, Any]:
     """Engine reliability stats and today's event summary."""
-    result = {}
+    result: dict[str, Any] = {}
     if router_instance:
         result["engines"] = router_instance.get_engine_stats()
     if logger_instance:
@@ -170,8 +172,9 @@ async def stats():
 
 
 @app.get("/stats/events")
-async def event_stats():
+async def event_stats() -> dict[str, Any]:
     """Detailed event statistics for research analysis."""
     if not logger_instance:
         return {"error": "Logger not initialized"}
     return logger_instance.get_stats_summary()
+

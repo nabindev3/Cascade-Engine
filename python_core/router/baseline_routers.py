@@ -20,8 +20,8 @@ fall back to a mock. Mock fallbacks were the original methodological bug.
 """
 
 import time
-from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from pydantic import BaseModel
+from typing import List, Optional, Tuple, Any
 
 from ..engines.base import (
     BaseEngine,
@@ -33,8 +33,7 @@ from ..engines.base import (
 from .cascade_router import RoutingDecision
 
 
-@dataclass
-class BaselineConfig:
+class BaselineConfig(BaseModel):
     max_cost_per_request: float = 0.05
 
 
@@ -88,7 +87,7 @@ class FrugalGPTRouter:
     def __init__(
         self,
         engines: List[BaseEngine],
-        config: BaselineConfig = None,
+        config: Optional[BaselineConfig] = None,
         threshold: float = 0.5,
         scorer: Optional[_RewardModelScorer] = None,
     ):
@@ -117,7 +116,7 @@ class FrugalGPTRouter:
             decision.tiers_attempted.append(engine.tier)
             decision.engines_tried.append(engine.engine_id)
 
-            response = await engine.infer(request)
+            response = await engine.predict(request)
             cumulative_cost += response.cost_usd
             response.was_escalated = is_escalated
 
@@ -201,7 +200,7 @@ class RouteLLMRouter:
     def __init__(
         self,
         engines: List[BaseEngine],
-        config: BaselineConfig = None,
+        config: Optional[BaselineConfig] = None,
         threshold_low: float = 0.33,
         threshold_high: float = 0.66,
         predictor: Optional[_RouteLLMPredictor] = None,
@@ -242,7 +241,7 @@ class RouteLLMRouter:
         decision.engines_tried.append(engine.engine_id)
         decision.escalation_reasons.append(f"routellm prob_strong={prob_strong:.3f}")
 
-        response = await engine.infer(request)
+        response = await engine.predict(request)
         decision.final_engine = engine.engine_id
         decision.final_tier = engine.tier
         decision.success = response.success

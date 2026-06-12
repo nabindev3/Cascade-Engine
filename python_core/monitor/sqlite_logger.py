@@ -3,7 +3,9 @@ import time
 from functools import wraps
 import json
 
-def init_db():
+from typing import Any, Callable
+
+def init_db() -> None:
     conn = sqlite3.connect('inference_research.db')
     conn.execute('''
         CREATE TABLE IF NOT EXISTS inferences (
@@ -21,25 +23,26 @@ def init_db():
 
 init_db()
 
-def instrument_inference(func):
+def instrument_inference(func: Callable[..., Any]) -> Callable[..., Any]:
     """
     Decorator for standardized observability.
     Logs every inference request to a SQLite database for the Measurement Study.
     """
     @wraps(func)
-    async def wrapper(request, *args, **kwargs):
-        start = time.perf_counter()
+    async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        start: float = time.perf_counter()
         
         # Execute the original inference call
-        response = await func(request, *args, **kwargs)
+        response: Any = await func(*args, **kwargs)
         
-        latency = (time.perf_counter() - start) * 1000
-        prompt_len = len(request.prompt) if hasattr(request, "prompt") else 0
+        latency: float = (time.perf_counter() - start) * 1000
+        request_obj = args[0] if args else (kwargs.get("req") or kwargs.get("request") or (list(kwargs.values())[0] if kwargs else None))
+        prompt_len: int = len(request_obj.prompt) if request_obj and hasattr(request_obj, "prompt") else 0
         
-        engine = response.engine_id if hasattr(response, "engine_id") else "unknown"
-        status = 200 if getattr(response, "success", False) else 500
-        cost = getattr(response, "cost_usd", 0.0)
-        was_escalated = getattr(response, "was_escalated", False)
+        engine: str = response.engine_id if hasattr(response, "engine_id") else "unknown"
+        status: int = 200 if getattr(response, "success", False) else 500
+        cost: float = getattr(response, "cost_usd", 0.0)
+        was_escalated: bool = getattr(response, "was_escalated", False)
         
         try:
             conn = sqlite3.connect('inference_research.db')
@@ -54,3 +57,4 @@ def instrument_inference(func):
             
         return response
     return wrapper
+

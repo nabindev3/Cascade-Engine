@@ -127,13 +127,13 @@ class EventLogger:
 
         return event
 
-    def log(self, event: InferenceEvent):
+    def log(self, event: InferenceEvent) -> None:
         """Buffer and write event to disk."""
         self._buffer.append(asdict(event))
         if len(self._buffer) >= self._buffer_size:
             self.flush()
 
-    def flush(self):
+    def flush(self) -> None:
         """Write buffered events to JSONL file."""
         if not self._buffer:
             return
@@ -147,30 +147,30 @@ class EventLogger:
         date_str = time.strftime("%Y-%m-%d")
         return self.output_dir / f"inference_events_{date_str}.jsonl"
 
-    def get_stats_summary(self) -> dict:
+    def get_stats_summary(self) -> dict[str, Any]:
         """Quick summary of today's events for the dashboard."""
         path = self._get_log_path()
         if not path.exists():
             return {"total_events": 0}
 
-        total = 0
-        successes = 0
-        total_cost = 0.0
-        tier_counts = {}
-        failure_modes = {}
+        total: int = 0
+        successes: int = 0
+        total_cost: float = 0.0
+        tier_counts: dict[int, int] = {}
+        failure_modes: dict[str, int] = {}
 
         with open(path) as f:
             for line in f:
                 if not line.strip():
                     continue
-                event = json.loads(line)
+                event: dict[str, Any] = json.loads(line)
                 total += 1
                 if event.get("success"):
                     successes += 1
                 total_cost += event.get("total_cost_usd", 0)
-                tier = event.get("final_tier", 0)
+                tier: int = event.get("final_tier", 0)
                 tier_counts[tier] = tier_counts.get(tier, 0) + 1
-                mode = event.get("failure_mode", "none")
+                mode: str = event.get("failure_mode", "none")
                 if mode != "none":
                     failure_modes[mode] = failure_modes.get(mode, 0) + 1
 
@@ -182,5 +182,6 @@ class EventLogger:
             "failure_mode_distribution": failure_modes,
         }
 
-    def __del__(self):
+    def __del__(self) -> None:
         self.flush()
+

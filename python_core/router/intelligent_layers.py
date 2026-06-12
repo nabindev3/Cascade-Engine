@@ -9,13 +9,14 @@ get its own orchestrator so cache state cannot leak across runs.
 
 import re
 import sqlite3
-from typing import Optional
+from typing import Any, Optional
+
 
 
 class PrivacyFilter:
     """Privacy-aware masking via Microsoft Presidio."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         from presidio_analyzer import AnalyzerEngine
         from presidio_anonymizer import AnonymizerEngine
         self.analyzer = AnalyzerEngine()
@@ -24,7 +25,7 @@ class PrivacyFilter:
                          "US_SSN", "IP_ADDRESS", "IBAN_CODE"]
 
     def mask(self, text: str) -> str:
-        results = self.analyzer.analyze(text=text, entities=self.entities, language="en")
+        results: list[Any] = self.analyzer.analyze(text=text, entities=self.entities, language="en")
         return self.anonymizer.anonymize(text=text, analyzer_results=results).text
 
 
@@ -38,7 +39,7 @@ class TokenBudget:
     def can_afford(self, estimated_cost: float) -> bool:
         return (self.spent_today + estimated_cost) <= self.daily_budget_usd
 
-    def charge(self, cost: float):
+    def charge(self, cost: float) -> None:
         self.spent_today += cost
 
 
@@ -101,7 +102,7 @@ class SemanticCache:
             return self.responses[idx]
         return None
 
-    def save_cache(self, prompt: str, response: str):
+    def save_cache(self, prompt: str, response: str) -> None:
         embedding = self.encoder.encode([prompt], normalize_embeddings=True)
         self.index.add(embedding)
         self.responses.append(response)
@@ -122,6 +123,7 @@ class IntelligentOrchestrator:
         sarcasm_threshold: float = 0.5,
         gatekeeper_device: int = -1,
     ):
+        from typing import Any
         self.privacy = PrivacyFilter()
         self.budget = TokenBudget(daily_budget_usd)
         self.classifier = GatekeeperClassifier(device=gatekeeper_device)

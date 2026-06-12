@@ -133,17 +133,21 @@ def build_engines(mode: str = "auto") -> tuple:
         ], "FakeEngine (smoke run — results not real)"
     try:
         from ..config.loader import load_config
-        from ..engines.local_engine import LocalEngine
-        from ..engines.cloud_engine import CloudEngine
+        from ..engines.local_engine import OllamaEngine
+        from ..engines.cloud_engine import create_mid_tier_engine, create_premium_engine
 
-        config = load_config()
+        config: dict[str, Any] = load_config()
         engines: List[BaseEngine] = []
-        if config.engines.local.enabled:
-            engines.append(LocalEngine(config=config.engines.local))
-        if config.engines.mid.enabled:
-            engines.append(CloudEngine(tier=2, config=config.engines.mid))
-        if config.engines.premium.enabled:
-            engines.append(CloudEngine(tier=3, config=config.engines.premium))
+        if config.get("engines", {}).get("local", {}).get("enabled", True):
+            engines.append(OllamaEngine(config=config.get("engines", {}).get("local", {})))
+        if config.get("engines", {}).get("mid", {}).get("enabled", True):
+            mid_cfg = config.get("engines", {}).get("mid", {})
+            if mid_cfg.get("api_key"):
+                engines.append(create_mid_tier_engine(mid_cfg))
+        if config.get("engines", {}).get("premium", {}).get("enabled", True):
+            premium_cfg = config.get("engines", {}).get("premium", {})
+            if premium_cfg.get("api_key"):
+                engines.append(create_premium_engine(premium_cfg))
         if engines:
             return engines, "real engines from config.yaml"
     except Exception as e:

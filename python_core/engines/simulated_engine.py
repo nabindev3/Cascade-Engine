@@ -4,29 +4,13 @@
 
 This engine does NOT call any model. It exists so the pipeline (router →
 benchmark → Pareto → figures) can be exercised end-to-end and so figures are
-*reproducible* without API spend. It is calibrated as follows:
-
-  * COST   — real. Uses the actual published per-token prices passed in from
-             config.yaml. A figure's x-axis (cost) is therefore quantitatively
-             meaningful even in simulation.
-  * LATENCY — real-calibrated. Drawn from a log-normal whose median/p99 match
-             publicly reported tier latencies (set via `latency_p50_ms`,
-             `latency_p99_ms`). Quantitatively plausible, not measured.
-  * QUALITY — SIMULATED. The `competence` parameter in [0,1] controls how
-             complete/coherent the synthetic response is, which the external
-             reward model then scores. This is the ONE axis that is NOT real.
-             It must be replaced by genuine model outputs before any quality
-             number appears in the paper.
-
-Every engine instance reports `engine_id` prefixed with `SIM:` so the
-manifest's `engines.label` and every generated figure are stamped as
-simulation. `make_figures.py` refuses to drop the watermark.
+*reproducible* without API spend.
 """
 
 import asyncio
 import random
 import time
-from typing import Optional
+from typing import Any, Optional, Tuple, List
 
 from .base import (
     BaseEngine,
@@ -36,7 +20,7 @@ from .base import (
     InferenceResponse,
 )
 
-SIM_PREFIX = "SIM:"
+SIM_PREFIX: str = "SIM:"
 
 
 class CalibratedSimulatedEngine(BaseEngine):
@@ -53,31 +37,31 @@ class CalibratedSimulatedEngine(BaseEngine):
         competence: float,
         failure_rate: float = 0.01,
         avg_output_tokens: int = 256,
-    ):
+    ) -> None:
         # Force the SIM: prefix so provenance can never be lost downstream.
-        sim_id = engine_id if engine_id.startswith(SIM_PREFIX) else f"{SIM_PREFIX}{engine_id}"
+        sim_id: str = engine_id if engine_id.startswith(SIM_PREFIX) else f"{SIM_PREFIX}{engine_id}"
         super().__init__(engine_id=sim_id, tier=tier, config={})
-        self.cost_per_input_token = cost_per_input_token
-        self.cost_per_output_token = cost_per_output_token
-        self.latency_p50_ms = latency_p50_ms
-        self.latency_p99_ms = latency_p99_ms
-        self.competence = max(0.0, min(1.0, competence))
-        self.failure_rate = failure_rate
-        self.avg_output_tokens = avg_output_tokens
+        self.cost_per_input_token: float = cost_per_input_token
+        self.cost_per_output_token: float = cost_per_output_token
+        self.latency_p50_ms: float = latency_p50_ms
+        self.latency_p99_ms: float = latency_p99_ms
+        self.competence: float = max(0.0, min(1.0, competence))
+        self.failure_rate: float = failure_rate
+        self.avg_output_tokens: int = avg_output_tokens
 
     # ----- cost: REAL (uses published per-token prices) -----
     def estimated_cost(self, request: InferenceRequest) -> float:
-        n_in = max(1, len(request.prompt.split()))
-        n_out = self.avg_output_tokens
+        n_in: int = max(1, len(request.prompt.split()))
+        n_out: int = self.avg_output_tokens
         return n_in * self.cost_per_input_token + n_out * self.cost_per_output_token
 
     # ----- latency: calibrated log-normal -----
     def _sample_latency_ms(self) -> float:
         # Solve a log-normal so that median == p50 and ~p99 quantile == p99.
         import math
-        mu = math.log(max(self.latency_p50_ms, 1.0))
+        mu: float = math.log(max(self.latency_p50_ms, 1.0))
         # z_{0.99} ≈ 2.326
-        sigma = max(
+        sigma: float = max(
             (math.log(max(self.latency_p99_ms, self.latency_p50_ms + 1.0)) - mu) / 2.326,
             1e-3,
         )
@@ -91,11 +75,11 @@ class CalibratedSimulatedEngine(BaseEngine):
         tier yields a higher reward — a *simulated* quality ladder. This is the
         explicitly non-real component.
         """
-        prompt = request.prompt.strip()
+        prompt: str = request.prompt.strip()
         # Competence controls how many structured, on-topic sentences we emit.
-        n_sentences = 1 + int(round(self.competence * 6))
-        head = f"Regarding: {prompt[:80]}"
-        body = " ".join(
+        n_sentences: int = 1 + int(round(self.competence * 6))
+        head: str = f"Regarding: {prompt[:80]}"
+        body: str = " ".join(
             f"Point {i+1}: a relevant, well-formed consideration addressing the request."
             for i in range(n_sentences)
         )
@@ -104,8 +88,8 @@ class CalibratedSimulatedEngine(BaseEngine):
             body += " (response may be incomplete)"
         return f"{head}. {body}"
 
-    async def infer(self, request: InferenceRequest) -> InferenceResponse:
-        latency_ms = self._sample_latency_ms()
+    async def predict(self, request: InferenceRequest) -> InferenceResponse:
+        latency_ms: float = self._sample_latency_ms()
         # Don't actually sleep the wall clock by seconds in a benchmark; emulate.
         await asyncio.sleep(0)
 
@@ -119,13 +103,13 @@ class CalibratedSimulatedEngine(BaseEngine):
                 error_message="simulated infrastructure failure",
             )
 
-        content = self._synthetic_response(request)
-        n_in = max(1, len(request.prompt.split()))
-        n_out = max(1, len(content.split()))
-        cost = n_in * self.cost_per_input_token + n_out * self.cost_per_output_token
+        content: str = self._synthetic_response(request)
+        n_in: int = max(1, len(request.prompt.split()))
+        n_out: int = max(1, len(content.split()))
+        cost: float = n_in * self.cost_per_input_token + n_out * self.cost_per_output_token
         # Self-reported confidence is competence + noise — the router may use
         # it, but quality_score in the benchmark comes from the reward model.
-        confidence = max(0.0, min(1.0, self.competence + random.uniform(-0.1, 0.1)))
+        confidence: float = max(0.0, min(1.0, self.competence + random.uniform(-0.1, 0.1)))
         self.record_success()
         return InferenceResponse(
             request_id=request.request_id, engine_id=self.engine_id,
@@ -138,7 +122,7 @@ class CalibratedSimulatedEngine(BaseEngine):
         return EngineStatus.HEALTHY
 
 
-def build_calibrated_sim_engines() -> tuple:
+def build_calibrated_sim_engines() -> Tuple[List[CalibratedSimulatedEngine], str]:
     """Three tiers calibrated to public 2025 list prices and reported latencies.
 
     Prices are real (per-token, USD). Latencies are plausible public figures.
@@ -147,7 +131,7 @@ def build_calibrated_sim_engines() -> tuple:
     Returns (engines, label) where label is explicitly a simulation marker so
     run_experiment records it in the manifest.
     """
-    engines = [
+    engines: List[CalibratedSimulatedEngine] = [
         # Tier 1: small local model (≈ Llama-3.2-3B on commodity GPU).
         CalibratedSimulatedEngine(
             "local-3b", tier=1,
@@ -171,3 +155,4 @@ def build_calibrated_sim_engines() -> tuple:
         ),
     ]
     return engines, "CALIBRATED SIMULATION (cost real, latency calibrated, quality simulated) — NOT real model calls"
+

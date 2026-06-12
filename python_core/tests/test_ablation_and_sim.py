@@ -68,8 +68,8 @@ async def test_sim_engine_quality_ladder_is_monotone_in_competence():
         latency_p50_ms=100, latency_p99_ms=500, competence=0.95, failure_rate=0.0,
     )
     req = InferenceRequest(request_id="t", prompt="Explain gradient descent.")
-    r_low = await low.infer(req)
-    r_high = await high.infer(req)
+    r_low = await low.predict(req)
+    r_high = await high.predict(req)
     assert r_low.success and r_high.success
     assert len(r_high.content) > len(r_low.content)
 

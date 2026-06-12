@@ -14,7 +14,7 @@ Order of operations (important):
   5. Save successful responses to cache.
 """
 
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 from ..engines.base import InferenceRequest, InferenceResponse
 from .cascade_router import RoutingDecision
@@ -24,22 +24,22 @@ from .intelligent_layers import IntelligentOrchestrator
 class OrchestrationWrapper:
     """Generic wrapper. The inner object must expose `async def route(request) -> (response, decision)`."""
 
-    def __init__(self, inner_router, orchestrator: Optional[IntelligentOrchestrator] = None):
-        self.inner = inner_router
-        self.orchestrator = orchestrator or IntelligentOrchestrator()
+    def __init__(self, inner_router: Any, orchestrator: Optional[IntelligentOrchestrator] = None) -> None:
+        self.inner: Any = inner_router
+        self.orchestrator: IntelligentOrchestrator = orchestrator or IntelligentOrchestrator()
 
     async def route(self, request: InferenceRequest) -> Tuple[InferenceResponse, RoutingDecision]:
         # 1. Privacy mask before anything touches the prompt.
         request.prompt = self.orchestrator.privacy.mask(request.prompt)
 
         # 2. Cache check on the masked prompt.
-        cached = self.orchestrator.cache.check_cache(request.prompt)
+        cached: Optional[str] = self.orchestrator.cache.check_cache(request.prompt)
         if cached is not None:
-            decision = RoutingDecision(request_id=request.request_id)
+            decision: RoutingDecision = RoutingDecision(request_id=request.request_id)
             decision.final_engine = "cache"
             decision.final_tier = 0
             decision.success = True
-            response = InferenceResponse(
+            response: InferenceResponse = InferenceResponse(
                 request_id=request.request_id,
                 engine_id="cache",
                 tier=0,
@@ -50,7 +50,7 @@ class OrchestrationWrapper:
             return response, decision
 
         # 3. Gatekeeper + sarcasm produce min_tier hints.
-        task_class = self.orchestrator.classifier.classify(request.prompt)
+        task_class: str = self.orchestrator.classifier.classify(request.prompt)
         if self.orchestrator.sarcasm.is_high_intensity(request.prompt):
             request.min_tier = 3
         elif task_class == "Logical" and (request.min_tier or 0) < 2:
@@ -58,7 +58,7 @@ class OrchestrationWrapper:
 
         # 4. Premium-tier budget pre-check (skip premium if daily budget exhausted).
         if request.min_tier == 3:
-            estimated_premium = 0.01  # conservative pre-estimate
+            estimated_premium: float = 0.01  # conservative pre-estimate
             if not self.orchestrator.budget.can_afford(estimated_premium):
                 request.min_tier = 2  # Downgrade rather than fail.
 
@@ -73,5 +73,6 @@ class OrchestrationWrapper:
 
         return response, decision
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: str) -> Any:
         return getattr(self.inner, name)
+

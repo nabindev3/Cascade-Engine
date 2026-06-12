@@ -7,10 +7,10 @@ input complexity, cost budget, and reliability history.
 """
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Optional
 import time
+from pydantic import BaseModel, Field
 
 
 class EngineStatus(Enum):
@@ -31,8 +31,7 @@ class FailureMode(Enum):
     INFRASTRUCTURE = "infrastructure"     # 500, network error, etc.
 
 
-@dataclass
-class InferenceRequest:
+class InferenceRequest(BaseModel):
     """A single inference request flowing through the cascade."""
     request_id: str
     prompt: str
@@ -40,16 +39,15 @@ class InferenceRequest:
     image_url: Optional[str] = None      # Multi-modal support (Tier 2/3 vision)
     max_tokens: int = 512
     temperature: float = 0.0
-    metadata: dict = field(default_factory=dict)
-    domain_context: dict = field(default_factory=dict) # Replaces specific industry terminology
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    domain_context: dict[str, Any] = Field(default_factory=dict) # Replaces specific industry terminology
 
     # Routing hints (optional — the router can override these)
     min_tier: Optional[int] = None       # Skip tiers below this
     max_cost: Optional[float] = None     # Budget ceiling for this request
 
 
-@dataclass
-class InferenceResponse:
+class InferenceResponse(BaseModel):
     """Response from an engine, enriched with observability data."""
     request_id: str
     engine_id: str
@@ -75,25 +73,25 @@ class InferenceResponse:
     was_escalated: bool = False
 
     # Timestamps
-    timestamp: float = field(default_factory=time.time)
+    timestamp: float = Field(default_factory=time.time)
 
 
 class BaseEngine(ABC):
     """
     Abstract base for all inference engines.
 
-    Each engine must declare its tier, cost model, and implement the `infer` method.
+    Each engine must declare its tier, cost model, and implement the `predict` method.
     The router uses `estimated_cost` and `health` to make routing decisions.
     """
 
-    def __init__(self, engine_id: str, tier: int, config: dict):
-        self.engine_id = engine_id
-        self.tier = tier
-        self.config = config
-        self._status = EngineStatus.HEALTHY
-        self._consecutive_failures = 0
-        self._total_calls = 0
-        self._total_failures = 0
+    def __init__(self, engine_id: str, tier: int, config: dict[str, Any]) -> None:
+        self.engine_id: str = engine_id
+        self.tier: int = tier
+        self.config: dict[str, Any] = config
+        self._status: EngineStatus = EngineStatus.HEALTHY
+        self._consecutive_failures: int = 0
+        self._total_calls: int = 0
+        self._total_failures: int = 0
 
     @property
     def status(self) -> EngineStatus:
@@ -107,7 +105,7 @@ class BaseEngine(ABC):
         return 1.0 - (self._total_failures / self._total_calls)
 
     @abstractmethod
-    async def infer(self, request: InferenceRequest) -> InferenceResponse:
+    async def predict(self, request: InferenceRequest) -> InferenceResponse:
         """Execute inference. Must handle its own errors and return InferenceResponse."""
         ...
 
@@ -121,14 +119,14 @@ class BaseEngine(ABC):
         """Probe engine readiness. Updates internal status."""
         ...
 
-    def record_success(self):
+    def record_success(self) -> None:
         """Called by router after successful inference."""
         self._total_calls += 1
         self._consecutive_failures = 0
         if self._status == EngineStatus.DEGRADED:
             self._status = EngineStatus.HEALTHY
 
-    def record_failure(self, mode: FailureMode):
+    def record_failure(self, mode: FailureMode) -> None:
         """Called by router after failed inference."""
         self._total_calls += 1
         self._total_failures += 1
@@ -140,10 +138,11 @@ class BaseEngine(ABC):
         elif self._consecutive_failures >= 1:
             self._status = EngineStatus.DEGRADED
 
-    def reset_circuit(self):
+    def reset_circuit(self) -> None:
         """Manually reset circuit breaker (e.g., after cooldown period)."""
         self._status = EngineStatus.HEALTHY
         self._consecutive_failures = 0
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"<{self.__class__.__name__} id={self.engine_id} tier={self.tier} status={self._status.value}>"
+

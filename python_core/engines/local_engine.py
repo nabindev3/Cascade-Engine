@@ -7,7 +7,7 @@ entity extraction, and short-form generation.
 
 import asyncio
 import time
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
 
@@ -31,17 +31,17 @@ class OllamaEngine(BaseEngine):
         cost_per_token: float (default 0.0 — local is "free" but we track compute)
     """
 
-    def __init__(self, engine_id: str = "ollama-local", config: dict = None):
+    def __init__(self, engine_id: str = "ollama-local", config: Optional[dict[str, Any]] = None) -> None:
         config = config or {}
         super().__init__(engine_id=engine_id, tier=1, config=config)
 
-        self.base_url = config.get("base_url", "http://localhost:11434")
-        self.model = config.get("model", "llama3.2:3b")
-        self.timeout_s = config.get("timeout_s", 30.0)
-        self.cost_per_token = config.get("cost_per_token", 0.000001)  # ~free
+        self.base_url: str = config.get("base_url", "http://localhost:11434")
+        self.model: str = config.get("model", "llama3.2:3b")
+        self.timeout_s: float = config.get("timeout_s", 30.0)
+        self.cost_per_token: float = config.get("cost_per_token", 0.000001)  # ~free
 
-    async def infer(self, request: InferenceRequest) -> InferenceResponse:
-        start = time.perf_counter()
+    async def predict(self, request: InferenceRequest) -> InferenceResponse:
+        start: float = time.perf_counter()
         try:
             async with httpx.AsyncClient(timeout=self.timeout_s) as client:
                 resp = await client.post(
@@ -57,12 +57,12 @@ class OllamaEngine(BaseEngine):
                     },
                 )
                 resp.raise_for_status()
-                data = resp.json()
+                data: dict[str, Any] = resp.json()
 
-            latency = (time.perf_counter() - start) * 1000
-            content = data.get("response", "")
-            token_count_output = data.get("eval_count", len(content.split()))
-            token_count_input = data.get("prompt_eval_count", len(request.prompt.split()))
+            latency: float = (time.perf_counter() - start) * 1000
+            content: str = data.get("response", "")
+            token_count_output: int = data.get("eval_count", len(content.split()))
+            token_count_input: int = data.get("prompt_eval_count", len(request.prompt.split()))
 
             self.record_success()
             return InferenceResponse(
@@ -96,7 +96,7 @@ class OllamaEngine(BaseEngine):
 
     def estimated_cost(self, request: InferenceRequest) -> float:
         # Rough estimate: input tokens + max output tokens
-        est_input_tokens = len(request.prompt.split()) * 1.3
+        est_input_tokens: float = len(request.prompt.split()) * 1.3
         return self.cost_per_token * (est_input_tokens + request.max_tokens)
 
     async def health_check(self) -> EngineStatus:
@@ -119,7 +119,7 @@ class OllamaEngine(BaseEngine):
         if not content or len(content.strip()) < 3:
             return 0.1
         # Longer, well-formed responses get higher base confidence
-        word_count = len(content.split())
+        word_count: int = len(content.split())
         if word_count > 5:
             return 0.6
         return 0.4
@@ -139,3 +139,4 @@ class OllamaEngine(BaseEngine):
             failure_mode=mode,
             error_message=msg,
         )
+

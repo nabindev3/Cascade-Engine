@@ -28,7 +28,7 @@ import random
 import time
 import numpy as np
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..engines.base import (
     BaseEngine,
@@ -37,6 +37,7 @@ from ..engines.base import (
     InferenceRequest,
     InferenceResponse,
 )
+from pydantic import BaseModel, Field
 from .cascade_router import RoutingDecision
 
 
@@ -65,7 +66,7 @@ class ArmStats:
         """Sample from Beta posterior."""
         return random.betavariate(self.alpha, self.beta)
 
-    def update(self, reward: float, decay: float = 1.0, floor: float = 1.0):
+    def update(self, reward: float, decay: float = 1.0, floor: float = 1.0) -> None:
         """Bernoulli-trick discounted update.
 
         Preserves conjugacy under continuous rewards by drawing y ~ Bernoulli(r)
@@ -86,8 +87,7 @@ class ArmStats:
         self.beta = max(floor, decay * self.beta + (1.0 - y))
 
 
-@dataclass
-class ThompsonConfig:
+class ThompsonConfig(BaseModel):
     """Configuration for the Thompson Sampling router."""
     # Reward function weights
     cost_penalty: float = 10.0          # λ: penalty per dollar spent
@@ -116,7 +116,7 @@ class ThompsonSamplingRouter:
     from the posterior for each engine and picks the one with highest sample.
     """
 
-    def __init__(self, engines: List[BaseEngine], config: ThompsonConfig = None):
+    def __init__(self, engines: List[BaseEngine], config: Optional[ThompsonConfig] = None) -> None:
         self.config = config or ThompsonConfig()
         self.engines = sorted(engines, key=lambda e: e.tier)
 
@@ -177,7 +177,7 @@ class ThompsonSamplingRouter:
             decision.tiers_attempted.append(engine.tier)
 
             # Execute inference
-            response = await engine.infer(request)
+            response = await engine.predict(request)
             decision.total_cost_usd += response.cost_usd
 
             # Compute reward
@@ -250,7 +250,9 @@ class ThompsonSamplingRouter:
         reward = quality - cost_term - latency_term
         return max(0.0, min(1.0, reward))
 
-    def _empty_response(self, request, decision, start):
+    def _empty_response(
+        self, request: InferenceRequest, decision: RoutingDecision, start: float
+    ) -> Tuple[InferenceResponse, RoutingDecision]:
         decision.total_latency_ms = (time.perf_counter() - start) * 1000
         return InferenceResponse(
             request_id=request.request_id,
@@ -276,16 +278,16 @@ class ThompsonSamplingRouter:
             }
         return result
 
-    def get_engine_preferences(self) -> Dict[int, str]:
+    def get_engine_preferences(self) -> dict[int, Optional[str]]:
         """For each complexity bin, which engine does the policy prefer?"""
-        preferences = {}
+        preferences: dict[int, Optional[str]] = {}
         for bin_idx in range(self.config.n_complexity_bins):
-            best_engine = None
-            best_ev = -1
+            best_engine: Optional[str] = None
+            best_ev: float = -1.0
             for engine in self.engines:
                 arm = self._arms.get((bin_idx, engine.engine_id))
                 if arm:
-                    ev = arm.alpha / (arm.alpha + arm.beta)
+                    ev: float = arm.alpha / (arm.alpha + arm.beta)
                     if ev > best_ev:
                         best_ev = ev
                         best_engine = engine.engine_id
@@ -320,8 +322,7 @@ class MDPState:
         )
 
 
-@dataclass
-class MDPConfig:
+class MDPConfig(BaseModel):
     """Configuration for the MDP router."""
     # Q-learning parameters
     learning_rate: float = 0.1
@@ -358,7 +359,7 @@ class MDPRouter:
     The STOP action accepts the best response seen so far.
     """
 
-    def __init__(self, engines: List[BaseEngine], config: MDPConfig = None):
+    def __init__(self, engines: List[BaseEngine], config: Optional[MDPConfig] = None) -> None:
         self.config = config or MDPConfig()
         self.engines = sorted(engines, key=lambda e: e.tier)
         self.n_actions = len(self.engines) + 1  # +1 for STOP action
@@ -392,8 +393,8 @@ class MDPRouter:
         )
 
         best_response: Optional[InferenceResponse] = None
-        episode_transitions = []  # (state, action, reward, next_state)
-        engines_tried_set = set()
+        episode_transitions: list[tuple[tuple[int, int, int, int, int], int, float, Optional[tuple[int, int, int, int, int]]]] = []
+        engines_tried_set: set[int] = set()
 
         for step in range(len(self.engines) + 1):
             # Select action (ε-greedy)
@@ -416,7 +417,7 @@ class MDPRouter:
             decision.engines_tried.append(engine.engine_id)
             decision.tiers_attempted.append(engine.tier)
 
-            response = await engine.infer(request)
+            response = await engine.predict(request)
             decision.total_cost_usd += response.cost_usd
             budget_remaining = max(0, 1 - decision.total_cost_usd / budget)
 
@@ -525,7 +526,7 @@ class MDPRouter:
                 self._q_table[state_key] = np.ones(self.n_actions) * 0.5
         return self._q_table[state_key]
 
-    def _update_q_table(self, transitions: list):
+    def _update_q_table(self, transitions: list[Any]) -> None:
         """Batch Q-learning or optimistic UCB-Q update from one episode's transitions."""
         gamma = self.config.discount_factor
         H = float(self.n_actions)
@@ -568,7 +569,7 @@ class MDPRouter:
                 # Standard Q-learning update
                 q_values[action] += lr * (target - q_values[action])
 
-    def _decay_epsilon(self):
+    def _decay_epsilon(self) -> None:
         """Reduce exploration over time."""
         self._epsilon = max(
             self.config.epsilon_min,
@@ -662,7 +663,7 @@ def prompt_features(prompt: str) -> np.ndarray:
     ], dtype=float)
 
 
-def make_embedding_feature_fn(model_name: str = "all-MiniLM-L6-v2"):
+def make_embedding_feature_fn(model_name: str = "all-MiniLM-L6-v2") -> Callable[[str], np.ndarray]:
     """Build a `feature_fn` that maps a prompt to a normalized semantic embedding.
 
     Optional path to fully semantic contexts (Step 2 of the research plan). Loads
@@ -681,8 +682,7 @@ def make_embedding_feature_fn(model_name: str = "all-MiniLM-L6-v2"):
     return feature_fn
 
 
-@dataclass
-class LinTSConfig:
+class LinTSConfig(BaseModel):
     """Configuration for the linear contextual Thompson sampling router."""
     # Reward function weights (same shape as ThompsonConfig for comparability).
     cost_penalty: float = 10.0
@@ -709,8 +709,8 @@ class LinTSArm:
         self.f = np.zeros(d)
         self.n_pulls = 0
         self._dirty = True
-        self._B_inv = None
-        self._mu = None
+        self._B_inv: np.ndarray = np.eye(d)
+        self._mu: np.ndarray = np.zeros(d)
 
     def _refresh(self) -> None:
         self._B_inv = np.linalg.inv(self.B)
@@ -748,9 +748,9 @@ class LinTSRouter:
     def __init__(
         self,
         engines: List[BaseEngine],
-        config: LinTSConfig = None,
-        feature_fn=None,
-    ):
+        config: Optional[LinTSConfig] = None,
+        feature_fn: Optional[Any] = None,
+    ) -> None:
         self.config = config or LinTSConfig()
         self.engines = sorted(engines, key=lambda e: e.tier)
         self.feature_fn = feature_fn or prompt_features
@@ -794,7 +794,7 @@ class LinTSRouter:
             decision.engines_tried.append(engine.engine_id)
             decision.tiers_attempted.append(engine.tier)
 
-            response = await engine.infer(request)
+            response = await engine.predict(request)
             decision.total_cost_usd += response.cost_usd
 
             reward = self._compute_reward(response)
@@ -827,7 +827,9 @@ class LinTSRouter:
         latency_term = response.latency_ms * self.config.latency_penalty
         return max(0.0, min(1.0, quality - cost_term - latency_term))
 
-    def _empty_response(self, request, decision, start):
+    def _empty_response(
+        self, request: InferenceRequest, decision: RoutingDecision, start: float
+    ) -> Tuple[InferenceResponse, RoutingDecision]:
         decision.total_latency_ms = (time.perf_counter() - start) * 1000
         return InferenceResponse(
             request_id=request.request_id,

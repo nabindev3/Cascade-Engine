@@ -29,7 +29,7 @@ import random
 import time
 import warnings
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple, Any
 
 import numpy as np
 
@@ -154,7 +154,7 @@ class RouterBenchmark:
     def __init__(
         self,
         engines: List[BaseEngine],
-        workload: List[WorkloadItem] = None,
+        workload: Optional[List[WorkloadItem]] = None,
         quality_scorer: Optional[QualityScorer] = None,
     ):
         self.engines = engines
@@ -209,7 +209,7 @@ class RouterBenchmark:
     def _build_routers(self, system_mode: bool) -> Dict[str, object]:
         """Construct one fresh router per strategy. Each gets its own
         OrchestrationWrapper instance when system_mode is on."""
-        def wrap(router):
+        def wrap(router: Any) -> Any:
             return OrchestrationWrapper(router, IntelligentOrchestrator()) if system_mode else router
 
         max_tier = max(e.tier for e in self.engines)
@@ -252,7 +252,7 @@ class RouterBenchmark:
             results[name] = await self._run_router(router, name)
         return results
 
-    async def _run_router(self, router, name: str) -> BenchmarkResult:
+    async def _run_router(self, router: Any, name: str) -> BenchmarkResult:
         result = BenchmarkResult(router_name=name)
         for item in self.workload:
             # Each router sees a deep-copied request to avoid mutations leaking.
@@ -344,7 +344,7 @@ class RouterBenchmark:
 
     async def run_single_router_experiment(
         self,
-        router_factory,
+        router_factory: Callable[[], Any],
         name: str,
         n_seeds: int = 5,
     ) -> Dict[str, AggregateStats]:
