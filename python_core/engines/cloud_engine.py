@@ -7,6 +7,8 @@ Tier 3 (Premium): Premium models — highest cost, best capability.
 Both use the OpenAI-compatible API format for simplicity (most providers support it).
 """
 
+import asyncio
+import random
 import time
 from typing import Any, Optional
 
@@ -33,8 +35,13 @@ class OpenAIEngine(BaseEngine):
         timeout_s: float (default 60.0)
         cost_per_input_token: float (in USD)
         cost_per_output_token: float (in USD)
-        max_retries: int (default 1)
+        max_retries: int (default 2 — number of retries on transient failures)
+        backoff_base_s: float (default 0.5 — base for exponential backoff)
+        backoff_max_s: float (default 30.0 — ceiling for a single backoff sleep)
     """
+
+    # HTTP statuses that are transient and worth retrying.
+    _RETRYABLE_STATUSES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
 
     def __init__(self, engine_id: str, tier: int, config: dict[str, Any]) -> None:
         super().__init__(engine_id=engine_id, tier=tier, config=config)
@@ -45,11 +52,35 @@ class OpenAIEngine(BaseEngine):
         self.timeout_s: float = config.get("timeout_s", 60.0)
         self.cost_per_input_token: float = config.get("cost_per_input_token", 0.0)
         self.cost_per_output_token: float = config.get("cost_per_output_token", 0.0)
-        self.max_retries: int = config.get("max_retries", 1)
+        self.max_retries: int = config.get("max_retries", 2)
+        self.backoff_base_s: float = config.get("backoff_base_s", 0.5)
+        self.backoff_max_s: float = config.get("backoff_max_s", 30.0)
+
+    async def _backoff_sleep(self, attempt: int, retry_after: Optional[str]) -> None:
+        """Sleep before a retry using jittered exponential backoff.
+
+        Honors a server-provided ``Retry-After`` header (seconds) when present,
+        otherwise uses ``backoff_base_s * 2**attempt`` capped at ``backoff_max_s``,
+        plus full jitter to avoid thundering-herd retries against the provider.
+        """
+        delay: float
+        if retry_after is not None:
+            try:
+                delay = float(retry_after)
+            except ValueError:
+                delay = self.backoff_base_s * (2 ** attempt)
+        else:
+            delay = self.backoff_base_s * (2 ** attempt)
+        delay = min(delay, self.backoff_max_s)
+        # Full jitter: sample in [0, delay] (https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/)
+        await asyncio.sleep(random.uniform(0.0, delay))
 
     async def predict(self, request: InferenceRequest) -> InferenceResponse:
         start: float = time.perf_counter()
         attempt: int = 0
+        # Remembered transient failure so the final return reports the real cause.
+        last_transient_mode: FailureMode = FailureMode.INFRASTRUCTURE
+        last_transient_msg: str = "Max retries exceeded"
 
         while attempt <= self.max_retries:
             try:
@@ -70,32 +101,31 @@ class OpenAIEngine(BaseEngine):
 
                 latency: float = (time.perf_counter() - start) * 1000
 
-                # Handle rate limits
-                if resp.status_code == 429:
-                    attempt += 1
-                    if attempt > self.max_retries:
-                        self.record_failure(FailureMode.RATE_LIMIT)
-                        return self._failure_response(
-                            request, FailureMode.RATE_LIMIT, latency, "Rate limited"
-                        )
-                    # Exponential backoff
-                    import asyncio
-                    await asyncio.sleep(2 ** attempt)
-                    continue
-
-                # Auth errors
+                # Auth errors — never retryable, fail fast.
                 if resp.status_code in (401, 403):
                     self.record_failure(FailureMode.AUTH_ERROR)
                     return self._failure_response(
                         request, FailureMode.AUTH_ERROR, latency, f"Auth error: {resp.status_code}"
                     )
 
-                # Server errors
-                if resp.status_code >= 500:
-                    self.record_failure(FailureMode.INFRASTRUCTURE)
-                    return self._failure_response(
-                        request, FailureMode.INFRASTRUCTURE, latency, f"Server error: {resp.status_code}"
+                # Transient errors (rate limit + server errors) — back off and retry.
+                if resp.status_code in self._RETRYABLE_STATUSES:
+                    last_transient_mode = (
+                        FailureMode.RATE_LIMIT if resp.status_code == 429
+                        else FailureMode.INFRASTRUCTURE
                     )
+                    last_transient_msg = (
+                        "Rate limited" if resp.status_code == 429
+                        else f"Server error: {resp.status_code}"
+                    )
+                    attempt += 1
+                    if attempt > self.max_retries:
+                        self.record_failure(last_transient_mode)
+                        return self._failure_response(
+                            request, last_transient_mode, latency, last_transient_msg
+                        )
+                    await self._backoff_sleep(attempt, resp.headers.get("Retry-After"))
+                    continue
 
                 resp.raise_for_status()
                 data: dict[str, Any] = resp.json()
@@ -133,17 +163,25 @@ class OpenAIEngine(BaseEngine):
                     success=True,
                 )
 
-            except httpx.TimeoutException:
+            # Network-level errors are transient — back off and retry.
+            except (httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError) as e:
                 latency = (time.perf_counter() - start) * 1000
-                self.record_failure(FailureMode.TIMEOUT)
-                return self._failure_response(request, FailureMode.TIMEOUT, latency, "API timeout")
-
-            except httpx.ConnectError:
-                latency = (time.perf_counter() - start) * 1000
-                self.record_failure(FailureMode.INFRASTRUCTURE)
-                return self._failure_response(
-                    request, FailureMode.INFRASTRUCTURE, latency, "Connection failed"
+                last_transient_mode = (
+                    FailureMode.TIMEOUT if isinstance(e, httpx.TimeoutException)
+                    else FailureMode.INFRASTRUCTURE
                 )
+                last_transient_msg = (
+                    "API timeout" if isinstance(e, httpx.TimeoutException)
+                    else "Connection failed"
+                )
+                attempt += 1
+                if attempt > self.max_retries:
+                    self.record_failure(last_transient_mode)
+                    return self._failure_response(
+                        request, last_transient_mode, latency, last_transient_msg
+                    )
+                await self._backoff_sleep(attempt, None)
+                continue
 
             except Exception as e:
                 latency = (time.perf_counter() - start) * 1000
@@ -152,10 +190,11 @@ class OpenAIEngine(BaseEngine):
                     request, FailureMode.INFRASTRUCTURE, latency, str(e)
                 )
 
-        # Should not reach here, but safety net
+        # All retries exhausted on a transient failure.
         latency = (time.perf_counter() - start) * 1000
+        self.record_failure(last_transient_mode)
         return self._failure_response(
-            request, FailureMode.INFRASTRUCTURE, latency, "Max retries exceeded"
+            request, last_transient_mode, latency, last_transient_msg
         )
 
     def estimated_cost(self, request: InferenceRequest) -> float:

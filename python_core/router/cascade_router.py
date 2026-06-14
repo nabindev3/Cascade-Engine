@@ -53,12 +53,17 @@ class RouterConfig(BaseModel):
     reliability_ema_alpha: float — smoothing factor for reliability EMA (0 < α ≤ 1).
     min_reliability_to_attempt: float — skip engine if reliability below this.
     enable_parallel_fallback: bool — if True, fire next tier in parallel on low confidence.
+    enable_local_fallback: bool — if True, when every tier at/above the request's
+        min_tier fails, retry the cheaper tiers that min_tier originally skipped.
+        This is the "downgrade to local" safety net: a degraded answer from a local
+        model beats a hard failure when the cloud tiers are down/rate-limited.
     """
     confidence_thresholds: dict[int, float] = Field(default_factory=lambda: {1: 0.65, 2: 0.80})
     max_cost_per_request: float = 0.05  # $0.05 default ceiling
     reliability_ema_alpha: float = 0.1
     min_reliability_to_attempt: float = 0.3
     enable_parallel_fallback: bool = False
+    enable_local_fallback: bool = True
     timeout_per_tier_ms: float = 30000.0
 
 
@@ -93,38 +98,18 @@ class CascadeRouter:
         best_response: Optional[InferenceResponse] = None
         cumulative_cost: float = 0.0
         is_escalated: bool = False
+        # Engines skipped *only* by the min_tier gate — candidates for the
+        # local-fallback safety net if every higher tier fails.
+        deferred_low_tier: list[BaseEngine] = []
 
         for engine in self.engines:
             # --- Gate 1: Minimum tier constraint ---
             if request.min_tier and engine.tier < request.min_tier:
+                deferred_low_tier.append(engine)
                 continue
 
-            # --- Gate 2: Engine health ---
-            if engine.status == EngineStatus.UNAVAILABLE:
-                decision.escalation_reasons.append(
-                    f"{engine.engine_id}: unavailable (circuit open)"
-                )
-                continue
-
-            # --- Gate 3: Reliability threshold ---
-            ema: float = self._reliability_ema.get(engine.engine_id, 1.0)
-            if ema < self.config.min_reliability_to_attempt:
-                decision.escalation_reasons.append(
-                    f"{engine.engine_id}: reliability too low ({ema:.2f})"
-                )
-                continue
-
-            # --- Gate 4: Cost budget ---
-            estimated: float = engine.estimated_cost(request)
-            if request.max_cost and (cumulative_cost + estimated) > request.max_cost:
-                decision.escalation_reasons.append(
-                    f"{engine.engine_id}: would exceed request budget"
-                )
-                continue
-            if (cumulative_cost + estimated) > self.config.max_cost_per_request:
-                decision.escalation_reasons.append(
-                    f"{engine.engine_id}: would exceed global budget"
-                )
+            # --- Gates 2-4: health, reliability, cost budget ---
+            if not self._engine_is_eligible(engine, request, cumulative_cost, decision):
                 continue
 
             # --- Attempt inference ---
@@ -172,6 +157,44 @@ class CascadeRouter:
                 is_escalated = True
                 continue
 
+        # --- Local-fallback safety net ---
+        # Every tier at/above min_tier failed (or none was eligible). Downgrade
+        # to the cheaper tiers that min_tier skipped rather than hard-failing.
+        if (
+            not decision.success
+            and self.config.enable_local_fallback
+            and deferred_low_tier
+        ):
+            for engine in deferred_low_tier:  # already sorted cheapest-first
+                if not self._engine_is_eligible(engine, request, cumulative_cost, decision):
+                    continue
+
+                decision.tiers_attempted.append(engine.tier)
+                decision.engines_tried.append(engine.engine_id)
+                decision.escalation_reasons.append(
+                    f"{engine.engine_id}: local fallback after higher tiers failed"
+                )
+
+                response = await engine.predict(request)
+                cumulative_cost += response.cost_usd
+                self._update_reliability(engine.engine_id, response.success)
+                response.was_escalated = True
+
+                if response.success:
+                    # Accept any success here — this is a degraded-mode last resort,
+                    # so confidence thresholds are intentionally not applied.
+                    decision.final_engine = engine.engine_id
+                    decision.final_tier = engine.tier
+                    decision.success = True
+                    decision.total_latency_ms = (time.perf_counter() - start) * 1000
+                    decision.total_cost_usd = cumulative_cost
+                    return response, decision
+
+                decision.escalation_reasons.append(
+                    f"{engine.engine_id}: fallback failed ({response.failure_mode.value})"
+                )
+                best_response = response
+
         # All tiers exhausted
         decision.total_latency_ms = (time.perf_counter() - start) * 1000
         decision.total_cost_usd = cumulative_cost
@@ -189,6 +212,47 @@ class CascadeRouter:
             )
 
         return best_response, decision
+
+    def _engine_is_eligible(
+        self,
+        engine: BaseEngine,
+        request: InferenceRequest,
+        cumulative_cost: float,
+        decision: RoutingDecision,
+    ) -> bool:
+        """Health, reliability, and cost-budget gates shared by the main cascade
+        and the local-fallback path. Appends a reason to ``decision`` when an
+        engine is gated out, and returns False; returns True if the engine may run.
+        """
+        # --- Engine health ---
+        if engine.status == EngineStatus.UNAVAILABLE:
+            decision.escalation_reasons.append(
+                f"{engine.engine_id}: unavailable (circuit open)"
+            )
+            return False
+
+        # --- Reliability threshold ---
+        ema: float = self._reliability_ema.get(engine.engine_id, 1.0)
+        if ema < self.config.min_reliability_to_attempt:
+            decision.escalation_reasons.append(
+                f"{engine.engine_id}: reliability too low ({ema:.2f})"
+            )
+            return False
+
+        # --- Cost budget ---
+        estimated: float = engine.estimated_cost(request)
+        if request.max_cost and (cumulative_cost + estimated) > request.max_cost:
+            decision.escalation_reasons.append(
+                f"{engine.engine_id}: would exceed request budget"
+            )
+            return False
+        if (cumulative_cost + estimated) > self.config.max_cost_per_request:
+            decision.escalation_reasons.append(
+                f"{engine.engine_id}: would exceed global budget"
+            )
+            return False
+
+        return True
 
     def _update_reliability(self, engine_id: str, success: bool) -> None:
         """Exponential moving average of success rate."""
