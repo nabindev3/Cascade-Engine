@@ -6,7 +6,6 @@
   <title>Cascade Engine — Live Dashboard</title>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <style>
     :root {
       --bg: #0e1116; --panel: #161b22; --panel-2: #1c232c; --border: #2a323d;
@@ -43,162 +42,158 @@
     .muted { color: var(--muted); }
     .err { color: var(--bad); font-size: 13px; }
     .kv { display: flex; justify-content: space-between; font-size: 13px; padding: 4px 0; }
-    code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
   </style>
 </head>
 <body>
   <div id="root"></div>
-  <script type="text/babel">
-    const { useState, useEffect, useCallback } = React;
+  <!--
+    Plain React (no JSX/Babel) for maximum reliability: `h` is React.createElement.
+    Polls /health and /v1/stats and renders system health, circuit-breaker state,
+    per-engine reliability, and today's routing stats.
+  -->
+  <script>
+    (function () {
+      var h = React.createElement;
+      var useState = React.useState, useEffect = React.useEffect, useCallback = React.useCallback;
 
-    const COLORS = {
-      healthy: "var(--ok)", closed: "var(--ok)", ok: "var(--ok)",
-      degraded: "var(--warn)", half_open: "var(--warn)",
-      unavailable: "var(--bad)", open: "var(--bad)", unreachable: "var(--bad)",
-    };
-    const colorFor = (s) => COLORS[String(s).toLowerCase()] || "var(--muted)";
-    const pct = (x) => `${(100 * (x || 0)).toFixed(1)}%`;
+      var COLORS = {
+        healthy: "var(--ok)", closed: "var(--ok)", ok: "var(--ok)",
+        degraded: "var(--warn)", half_open: "var(--warn)",
+        unavailable: "var(--bad)", open: "var(--bad)", unreachable: "var(--bad)"
+      };
+      function colorFor(s) { return COLORS[String(s).toLowerCase()] || "var(--muted)"; }
+      function pct(x) { return (100 * (x || 0)).toFixed(1) + "%"; }
 
-    function Badge({ value }) {
-      const c = colorFor(value);
-      return <span className="badge" style={{ background: c + "22", color: c }}>{String(value)}</span>;
-    }
+      function Badge(props) {
+        var c = colorFor(props.value);
+        return h("span", { className: "badge", style: { background: c + "22", color: c } }, String(props.value));
+      }
 
-    function HealthCard({ health, error }) {
-      const circuit = health && health.circuit;
-      const coreState = health && (typeof health.core === "string" ? health.core
-        : (health.core && health.core.status) || "ok");
-      return (
-        <div className="card">
-          <h2>System Health</h2>
-          {error && <div className="err">{error}</div>}
-          <div className="row"><span>Gateway</span><Badge value={(health && health.gateway) || "?"} /></div>
-          <div className="row"><span>Core service</span><Badge value={coreState || "?"} /></div>
-          <div className="row">
-            <span>Circuit breaker</span>
-            <Badge value={(circuit && circuit.state) || "n/a"} />
-          </div>
-          <div className="row">
-            <span>Cloud fallback</span>
-            <span className="muted">{health && health.fallback_configured ? "configured" : "off"}</span>
-          </div>
-        </div>
-      );
-    }
+      function HealthCard(props) {
+        var health = props.health || {};
+        var circuit = health.circuit;
+        var coreState = typeof health.core === "string" ? health.core
+          : (health.core && health.core.status) || "ok";
+        return h("div", { className: "card" },
+          h("h2", null, "System Health"),
+          props.error ? h("div", { className: "err" }, props.error) : null,
+          h("div", { className: "row" }, h("span", null, "Gateway"), h(Badge, { value: health.gateway || "?" })),
+          h("div", { className: "row" }, h("span", null, "Core service"), h(Badge, { value: coreState || "?" })),
+          h("div", { className: "row" }, h("span", null, "Circuit breaker"), h(Badge, { value: (circuit && circuit.state) || "n/a" })),
+          h("div", { className: "row" }, h("span", null, "Cloud fallback"),
+            h("span", { className: "muted" }, health.fallback_configured ? "configured" : "off"))
+        );
+      }
 
-    function EnginesCard({ engines }) {
-      const ids = Object.keys(engines || {});
-      return (
-        <div className="card">
-          <h2>Engines — Reliability</h2>
-          {ids.length === 0 && <div className="muted">No engine data yet.</div>}
-          {ids.sort((a, b) => (engines[a].tier || 0) - (engines[b].tier || 0)).map((id) => {
-            const e = engines[id];
-            const ema = e.reliability_ema != null ? e.reliability_ema : e.reliability;
-            return (
-              <div key={id} style={{ padding: "8px 0", borderBottom: "1px solid var(--border)" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <span>{id} <span className="muted">· T{e.tier}</span></span>
-                  <Badge value={e.status} />
-                </div>
-                <div className="bar"><div style={{ width: pct(ema), background: colorFor(e.status) }} /></div>
-                <div className="kv muted"><span>reliability (EMA)</span><span>{pct(ema)}</span></div>
-              </div>
+      function EnginesCard(props) {
+        var engines = props.engines || {};
+        var ids = Object.keys(engines);
+        ids.sort(function (a, b) { return (engines[a].tier || 0) - (engines[b].tier || 0); });
+        return h("div", { className: "card" },
+          h("h2", null, "Engines — Reliability"),
+          ids.length === 0 ? h("div", { className: "muted" }, "No engine data yet.") : null,
+          ids.map(function (id) {
+            var e = engines[id];
+            var ema = e.reliability_ema != null ? e.reliability_ema : e.reliability;
+            return h("div", { key: id, style: { padding: "8px 0", borderBottom: "1px solid var(--border)" } },
+              h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center" } },
+                h("span", null, id, " ", h("span", { className: "muted" }, "· T" + e.tier)),
+                h(Badge, { value: e.status })),
+              h("div", { className: "bar" }, h("div", { style: { width: pct(ema), background: colorFor(e.status) } })),
+              h("div", { className: "kv muted" }, h("span", null, "reliability (EMA)"), h("span", null, pct(ema)))
             );
-          })}
-        </div>
-      );
-    }
+          })
+        );
+      }
 
-    function Distribution({ title, data, label }) {
-      const entries = Object.entries(data || {});
-      const total = entries.reduce((s, [, v]) => s + v, 0) || 1;
-      return (
-        <div className="card">
-          <h2>{title}</h2>
-          {entries.length === 0 && <div className="muted">None.</div>}
-          {entries.sort((a, b) => b[1] - a[1]).map(([k, v]) => (
-            <div key={k} style={{ padding: "6px 0" }}>
-              <div className="kv"><span>{label ? label(k) : k}</span><span className="muted">{v}</span></div>
-              <div className="bar"><div style={{ width: pct(v / total) }} /></div>
-            </div>
-          ))}
-        </div>
-      );
-    }
+      function Distribution(props) {
+        var data = props.data || {};
+        var entries = Object.keys(data).map(function (k) { return [k, data[k]]; });
+        var total = entries.reduce(function (s, e) { return s + e[1]; }, 0) || 1;
+        entries.sort(function (a, b) { return b[1] - a[1]; });
+        return h("div", { className: "card" },
+          h("h2", null, props.title),
+          entries.length === 0 ? h("div", { className: "muted" }, "None.") : null,
+          entries.map(function (e) {
+            var k = e[0], v = e[1];
+            return h("div", { key: k, style: { padding: "6px 0" } },
+              h("div", { className: "kv" }, h("span", null, props.label ? props.label(k) : k), h("span", { className: "muted" }, v)),
+              h("div", { className: "bar" }, h("div", { style: { width: pct(v / total) } }))
+            );
+          })
+        );
+      }
 
-    function TodayCard({ today }) {
-      const t = today || {};
-      return (
-        <div className="card">
-          <h2>Today</h2>
-          <div className="stat">{t.total_events || 0}</div>
-          <div className="muted" style={{ marginBottom: 12 }}>requests</div>
-          <div className="row"><span>Success rate</span><strong>{pct(t.success_rate)}</strong></div>
-          <div className="row"><span>Total cost</span><strong>${(t.total_cost_usd || 0).toFixed(4)}</strong></div>
-        </div>
-      );
-    }
+      function TodayCard(props) {
+        var t = props.today || {};
+        return h("div", { className: "card" },
+          h("h2", null, "Today"),
+          h("div", { className: "stat" }, t.total_events || 0),
+          h("div", { className: "muted", style: { marginBottom: 12 } }, "requests"),
+          h("div", { className: "row" }, h("span", null, "Success rate"), h("strong", null, pct(t.success_rate))),
+          h("div", { className: "row" }, h("span", null, "Total cost"), h("strong", null, "$" + (t.total_cost_usd || 0).toFixed(4)))
+        );
+      }
 
-    function App() {
-      const [key, setKey] = useState(localStorage.getItem("cascade_key") || "");
-      const [health, setHealth] = useState(null);
-      const [stats, setStats] = useState(null);
-      const [error, setError] = useState("");
-      const [updated, setUpdated] = useState(null);
+      function App() {
+        var k = useState(localStorage.getItem("cascade_key") || ""), key = k[0], setKey = k[1];
+        var hs = useState(null), health = hs[0], setHealth = hs[1];
+        var st = useState(null), stats = st[0], setStats = st[1];
+        var er = useState(""), error = er[0], setError = er[1];
+        var up = useState(null), updated = up[0], setUpdated = up[1];
 
-      const refresh = useCallback(async () => {
-        try {
-          const h = await fetch("/health").then((r) => r.json()).catch(() => null);
-          if (h) setHealth(h);
+        var refresh = useCallback(function () {
+          fetch("/health").then(function (r) { return r.json(); }).then(function (hh) { if (hh) setHealth(hh); }).catch(function () {});
           if (key) {
-            const r = await fetch("/v1/stats", { headers: { Authorization: `Bearer ${key}` } });
-            if (r.status === 401 || r.status === 403) { setError("Invalid API key for /v1/stats"); }
-            else { setStats(await r.json()); setError(""); }
+            fetch("/v1/stats", { headers: { Authorization: "Bearer " + key } }).then(function (r) {
+              if (r.status === 401 || r.status === 403) { setError("Invalid API key for /v1/stats"); return null; }
+              return r.json();
+            }).then(function (s) { if (s) { setStats(s); setError(""); } }).catch(function (e) { setError(String(e)); });
           } else {
             setError("Enter an API key to load routing stats.");
           }
           setUpdated(new Date());
-        } catch (e) {
-          setError(String(e));
-        }
-      }, [key]);
+        }, [key]);
 
-      useEffect(() => {
-        refresh();
-        const id = setInterval(refresh, 4000);
-        return () => clearInterval(id);
-      }, [refresh]);
+        useEffect(function () {
+          refresh();
+          var id = setInterval(refresh, 4000);
+          return function () { clearInterval(id); };
+        }, [refresh]);
 
-      const online = health && health.gateway === "ok";
-      return (
-        <div className="wrap">
-          <header>
-            <div className="dot" style={{ background: online ? "var(--ok)" : "var(--bad)" }} />
-            <div>
-              <h1>Cascade Engine</h1>
-              <div className="sub">Live routing dashboard · auto-refresh 4s
-                {updated && <span> · updated {updated.toLocaleTimeString()}</span>}</div>
-            </div>
-            <div className="spacer" />
-            <input
-              type="password" placeholder="API key (Bearer)" value={key}
-              onChange={(e) => { setKey(e.target.value); localStorage.setItem("cascade_key", e.target.value); }}
-            />
-          </header>
-          <div className="grid">
-            <HealthCard health={health} error={!stats ? error : ""} />
-            <TodayCard today={stats && stats.today} />
-            <EnginesCard engines={stats && stats.engines} />
-            <Distribution title="Tier Distribution" data={stats && stats.today && stats.today.tier_distribution}
-              label={(k) => k === "0" ? "cache" : `Tier ${k}`} />
-            <Distribution title="Failure Modes" data={stats && stats.today && stats.today.failure_mode_distribution} />
-          </div>
-        </div>
-      );
-    }
+        var online = health && health.gateway === "ok";
+        return h("div", { className: "wrap" },
+          h("header", null,
+            h("span", { className: "dot", style: { background: online ? "var(--ok)" : "var(--bad)" } }),
+            h("div", null,
+              h("h1", null, "Cascade Engine"),
+              h("div", { className: "sub" }, "Live routing dashboard · auto-refresh 4s",
+                updated ? " · updated " + updated.toLocaleTimeString() : "")),
+            h("div", { className: "spacer" }),
+            h("input", {
+              type: "password", placeholder: "API key (Bearer)", value: key,
+              onChange: function (e) { setKey(e.target.value); localStorage.setItem("cascade_key", e.target.value); }
+            })
+          ),
+          h("div", { className: "grid" },
+            h(HealthCard, { health: health, error: !stats ? error : "" }),
+            h(TodayCard, { today: stats && stats.today }),
+            h(EnginesCard, { engines: stats && stats.engines }),
+            h(Distribution, {
+              title: "Tier Distribution",
+              data: stats && stats.today && stats.today.tier_distribution,
+              label: function (k) { return k === "0" ? "cache" : "Tier " + k; }
+            }),
+            h(Distribution, {
+              title: "Failure Modes",
+              data: stats && stats.today && stats.today.failure_mode_distribution
+            })
+          )
+        );
+      }
 
-    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+      ReactDOM.createRoot(document.getElementById("root")).render(h(App));
+    })();
   </script>
 </body>
 </html>

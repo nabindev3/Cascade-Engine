@@ -26,8 +26,9 @@ logic bugs:
   initializes an OpenAI client at import). These now **skip cleanly** without a
   key and **run for real** when one is present (`test_baseline_routers.py`).
 
-Current state: **66 passed, 14 heavy deselected** (fast suite); heavy suite green
-except the credential-gated RouteLLM tests.
+Current state: **79 passed, 14 heavy deselected** (Python fast suite) +
+**29 passed** (TypeScript gateway suite); heavy suite green except the
+credential-gated RouteLLM tests.
 
 ---
 
@@ -39,10 +40,10 @@ except the credential-gated RouteLLM tests.
 | 2 | Semantic / linear bandits | ✅ **Implemented this session** | `LinTSRouter` + `LinTSArm` (Bayesian linear TS, Agrawal & Goyal 2013), dependency-free `prompt_features`, optional `make_embedding_feature_fn` for sentence-transformers. Wired into the benchmark as `lints`. Tests: `test_lints.py`. |
 | 3 | Adaptive drift (no prior `V_T`) | ✅ **Implemented this session** | `CUSUMDetector` + `AdaptiveCDTSPolicy` (detect-and-restart, Cao et al. 2019). Added as a first-class comparator in the non-stationary experiment. **Matches/beats the oracle-tuned CD-TS without ever seeing `V_T`.** Tests: `test_nonstationary.py`. |
 | 4 | DBV-25 unified cascading composition | ⬜ Not started | Research: compose the ICML-2025 per-query optimal rule on top of the online posteriors. |
-| 5 | Risk-sensitive SLA constraints (CMDP) | ⬜ Not started | Research: constrained-bandit / CMDP objective with latency/budget caps. |
-| 6 | Real-time React/Next.js dashboard | ⬜ Not started | Engineering: front-end over `/v1/stats` (Beta posteriors, savings, drift). |
-| 7 | TS gateway test suite | ✅ **Implemented this session** | `typescript_api/tests/` (vitest + supertest): auth, validation, proxy, error/status propagation, batch limits, rate limiting. **19 tests pass**; `tsc --noEmit` clean. |
-| 8 | Direct gateway cloud fallback (circuit breaker) | ⬜ Not started | Engineering: fallback path in `server.ts` when the core is unhealthy. |
+| 5 | Risk-sensitive SLA constraints (CMDP) | ✅ **Implemented this session** | `latency_slo_ms` on the request + `RouterConfig.sla_risk_aversion`. The router skips tiers whose risk-adjusted (p50→p99) estimated latency would breach the remaining budget; if no tier is feasible it relaxes to best-effort and flags `RoutingDecision.sla_violated`. Cost cap (`max_cost`) is the budget SLO. Tests: `test_sla_constraints.py`. |
+| 6 | Real-time React dashboard | ✅ **Implemented this session** | `typescript_api/public/dashboard.html` served at `/dashboard`; polls `/health` + `/v1/stats`, shows system/circuit health, per-engine reliability (EMA), today's success rate/cost, and tier/failure distributions. Plain React (no JSX/Babel) for reliability. Tests: `dashboard.test.ts`. |
+| 7 | TS gateway test suite | ✅ **Implemented this session** | `typescript_api/tests/` (vitest + supertest): auth, validation, proxy, error/status propagation, batch limits, rate limiting, circuit breaker, fallback, dashboard. **29 tests pass**; `tsc --noEmit` clean. |
+| 8 | Direct gateway cloud fallback (circuit breaker) | ✅ **Implemented this session** | `circuitBreaker.ts` (CLOSED/OPEN/HALF_OPEN) around the core call in `server.ts`; on core ill-health (5xx/network/open) it serves a direct cloud completion (`FALLBACK_OPENAI_API_KEY`) in degraded mode, else fails fast (503). 4xx still propagates verbatim. Tests: `circuitBreaker.test.ts`, `fallback.test.ts`. Also: cloud-engine **exponential backoff with jitter** on 429/5xx/timeouts + **downgrade-to-local fallback** in the router (`enable_local_fallback`). |
 | 9 | Redis distributed state sync | ⬜ Not started | Engineering: move posteriors/Q-values/EMAs into Redis (compose already has it). |
 | 10 | Async predictive pre-warming | ⬜ Not started | Engineering: speculative next-tier spin-up to hide escalation latency. |
 | 11 | Real NLP/serving benchmarks | ✅ **Already done** | `data_loader.load_prompt_workload` loads any HF dataset (alpaca_eval default; pass `dataset_name="gsm8k"` / `"cais/mmlu"` for those). Reward-model scoring, multi-seed t-CIs, Pareto frontier all present. |
@@ -129,7 +130,9 @@ cd typescript_api && npm install && npm test
 3. **Step 12 (replay simulator).** Record real engine responses and replay with
    injected latency/availability drift — turns the controlled experiment into a
    real-trace one and strengthens empirical credibility.
-4. **Step 8/9 (gateway fallback + Redis state).** Production-systems story for
-   MLSys; both are self-contained engineering with clear test surfaces.
+4. **Step 9 (Redis distributed state).** Production-systems story for MLSys:
+   move posteriors/Q-values/EMAs into Redis (compose already provides it).
+   Self-contained engineering with a clear test surface. (Step 8 gateway
+   fallback is now done — see the table above.)
 5. **Steps 4/5 (DBV-25 composition, CMDP/SLA).** The deepest theory; pursue once
    the above are written up.

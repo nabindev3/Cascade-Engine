@@ -8,8 +8,8 @@ Follow these steps to set up the environment and install the necessary dependenc
 
 1. **Clone the repository:**
 ```bash
-git clone https://github.com/your-username/cascade-engine.git
-cd cascade-engine
+git clone https://github.com/nabindev3/Cascade-Engine.git
+cd Cascade-Engine
 ```
 
 2. **Create and activate the environment:**
@@ -32,58 +32,83 @@ python -m spacy download en_core_web_lg
 
 This library allows you to run multi-tier cascading strategies with intelligent preprocessing layers for any downstream LLM application. 
 
-### Step 1. Initialize the Intelligent Layers
-Cascade Engine relies on preprocessing layers to aggressively filter and cache queries before they reach expensive models.
+The router is fully **async** and **dependency-injected**: you build the engines,
+the router config, and (optionally) the intelligent-layer orchestrator, then pass
+them in. All payloads are validated by Pydantic models (`InferenceRequest` /
+`InferenceResponse`).
 
-```python
-from python_core.router.intelligent_layers import SemanticCache, PrivacyFilter, Gatekeeper
-
-# 1. Initialize Privacy Filter (Presidio) to redact PII
-privacy_filter = PrivacyFilter()
-
-# 2. Initialize Semantic Cache (FAISS) for exact/close matches
-cache = SemanticCache(threshold=0.85)
-
-# 3. Initialize Gatekeeper (DistilBERT + VADER) for complexity routing
-gatekeeper = Gatekeeper()
-```
-
-### Step 2. Initialize the Engines
-Define the tiers of models you want to use. We typically use a 3-tier system: Local, Mid-Cloud, and Premium-Cloud.
+### Step 1. Initialize the Engines
+Define the tiers of models you want to use. We typically use a 3-tier system: Local, Mid-Cloud, and Premium-Cloud. Cloud engines accept an OpenAI-compatible config dict; the factories fill in sensible per-token pricing defaults.
 
 ```python
 from python_core.engines.local_engine import OllamaEngine
-from python_core.engines.cloud_engine import OpenAIEngine
+from python_core.engines.cloud_engine import create_mid_tier_engine, create_premium_engine
 
-tier1 = OllamaEngine(model_name="llama3.2:3b")
-tier2 = OpenAIEngine(model_name="gpt-4o-mini", api_key="YOUR_KEY")
-tier3 = OpenAIEngine(model_name="gpt-4o", api_key="YOUR_KEY")
+tier1 = OllamaEngine(config={"model": "llama3.2:3b"})
+tier2 = create_mid_tier_engine({"api_key": "YOUR_KEY", "model": "gpt-4o-mini"})
+tier3 = create_premium_engine({"api_key": "YOUR_KEY", "model": "gpt-4o"})
 
 engines = [tier1, tier2, tier3]
 ```
 
-### Step 3. Run Queries through the Router
-You can now use the `CascadeRouter` or `FrugalRouter` to process queries dynamically based on complexity and confidence.
+### Step 2. Build the Router
+`CascadeRouter` takes the engines and a `RouterConfig`. The config controls the
+confidence-gated cascade plus the production safety nets: **exponential backoff**
+(in the cloud engines), **downgrade-to-local fallback**, and **risk-sensitive SLA
+constraints**.
 
 ```python
-from python_core.router.cascade_router import FrugalRouter
+import asyncio
+from python_core.engines.base import InferenceRequest
+from python_core.router.cascade_router import CascadeRouter, RouterConfig
 
-router = FrugalRouter(
+router = CascadeRouter(
     engines=engines,
-    privacy_filter=privacy_filter,
-    cache=cache,
-    gatekeeper=gatekeeper,
-    confidence_threshold=0.9
+    config=RouterConfig(
+        confidence_thresholds={1: 0.65, 2: 0.80},
+        max_cost_per_request=0.05,     # cost SLO (USD)
+        enable_local_fallback=True,    # downgrade to a local tier if the cloud fails
+        enable_sla_constraints=True,   # honor per-request latency SLOs
+        sla_risk_aversion=0.5,         # 0 = budget against p50, 1 = against the tail (~p99)
+    ),
 )
+```
 
-query = "Write a python script to reverse a linked list."
+### Step 3. Run Queries through the Router
+`route()` is a coroutine returning `(InferenceResponse, RoutingDecision)`. The
+decision records the full routing path, escalation reasons, cost, and any SLA
+violation — the data behind the dashboard and the paper.
 
-# The router will automatically triage through cache, privacy, and the required model tier
-response, metadata = router.predict(query)
+```python
+async def main():
+    request = InferenceRequest(
+        request_id="demo-1",
+        prompt="Write a python script to reverse a linked list.",
+        max_cost=0.02,         # per-request cost ceiling
+        latency_slo_ms=1500,   # per-request latency SLO
+    )
+    response, decision = await router.route(request)
 
-print(response)
-print(f"Routed to: {metadata['engine_used']}")
-print(f"Cost: ${metadata['cost']}")
+    print(response.content)
+    print(f"Routed to: {response.engine_used if hasattr(response, 'engine_used') else response.engine_id}")
+    print(f"Tier: {response.tier}  Cost: ${decision.total_cost_usd:.6f}")
+    print(f"Path: {decision.engines_tried}  SLA violated: {decision.sla_violated}")
+
+asyncio.run(main())
+```
+
+### (Optional) Wrap with the Intelligent Layers
+To add PII masking, semantic caching, and gatekeeper/sarcasm routing hints around
+*any* router, wrap it in an `OrchestrationWrapper`. Each wrapper owns its own
+`IntelligentOrchestrator` (Presidio + FAISS + DistilBERT + VADER) so cache state
+never leaks across instances.
+
+```python
+from python_core.router.intelligent_layers import IntelligentOrchestrator
+from python_core.router.orchestration_wrapper import OrchestrationWrapper
+
+wrapped = OrchestrationWrapper(inner_router=router, orchestrator=IntelligentOrchestrator())
+response, decision = await wrapped.route(request)  # masks PII → cache → gatekeeper → route
 ```
 
 ## Architecture & Request Flow
@@ -118,6 +143,36 @@ flowchart TD
     J --> K(["Final Response"]):::request
     D --> K
 ```
+
+## API Gateway & Live Dashboard
+
+A production-facing TypeScript gateway (`typescript_api/`) sits in front of the
+Python core. It handles API-key auth, per-client rate limiting, request tracking,
+and — when the core is unhealthy — a **circuit breaker with a direct cloud
+fallback** so the service degrades gracefully instead of failing hard.
+
+```bash
+cd typescript_api
+npm install
+npm run dev          # gateway on :3000, expects the Python core on :8000
+npm test             # vitest + supertest suite
+```
+
+Key environment variables:
+
+| Variable | Purpose |
+|----------|---------|
+| `CORE_SERVICE_URL` | URL of the Python core (default `http://localhost:8000`) |
+| `API_KEYS` | Comma-separated valid keys for `Bearer` auth |
+| `CORE_CIRCUIT_FAILURE_THRESHOLD` / `CORE_CIRCUIT_COOLDOWN_MS` | Circuit-breaker tuning |
+| `FALLBACK_OPENAI_API_KEY` / `FALLBACK_MODEL` | Enable the degraded-mode direct cloud fallback |
+
+**Live dashboard.** With the gateway running, open
+[`http://localhost:3000/dashboard`](http://localhost:3000/dashboard). It polls
+`/health` and `/v1/stats` every few seconds and shows system health, the circuit
+breaker state, per-engine reliability (EMA), today's success rate / cost, and the
+tier & failure-mode distributions. Paste an API key in the top-right to load the
+authenticated routing stats.
 
 ## Reproducing Results
 
@@ -157,6 +212,7 @@ Below is a high-level overview of the code in this repository:
   - `intelligent_layers.py`: The preprocessing modules (SemanticCache, PrivacyFilter, Gatekeeper).
   - `benchmark.py`: Evaluates the routers against Alpaca-Eval.
 - **`python_core/scripts/`**: Experiment execution (`run_experiment.py`) and visualization generation (`make_figures.py`).
+- **`typescript_api/`**: The public API gateway (auth, rate limiting, circuit-breaker fallback) and the live dashboard (`public/dashboard.html`).
 - **`paper/`**: The LaTeX source files and a compiled Markdown version of our academic manuscript.
 
 ## Citation

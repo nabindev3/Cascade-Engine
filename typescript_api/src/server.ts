@@ -16,7 +16,12 @@ import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import { v4 as uuidv4 } from "uuid";
 import pino from "pino";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { CircuitBreaker } from "./circuitBreaker.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const PUBLIC_DIR = path.join(__dirname, "..", "public");
 
 // The pino-pretty transport runs in a worker thread; skip it under tests so the
 // test runner can tear down cleanly (and to keep test output quiet).
@@ -54,9 +59,31 @@ const coreBreaker = new CircuitBreaker({
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
 
-app.use(helmet());
+// CSP allows the React CDN + the dashboard's inline script, while keeping
+// Helmet's other hardening for the API surface. (No eval: the dashboard uses
+// React.createElement directly, not in-browser JSX compilation.)
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'", "'unsafe-inline'", "https://unpkg.com"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        connectSrc: ["'self'"],
+        imgSrc: ["'self'", "data:"],
+      },
+    },
+  })
+);
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
+
+// Live dashboard (no auth on the HTML shell; it calls /v1/stats with a key).
+app.use("/static", express.static(PUBLIC_DIR));
+app.get("/dashboard", (_req, res) => {
+  res.sendFile(path.join(PUBLIC_DIR, "dashboard.html"));
+});
+app.get("/", (_req, res) => res.redirect("/dashboard"));
 
 // Rate limiting: 100 requests per minute per IP (overridable via env so the
 // integration tests can exercise the limiter without firing hundreds of calls).
