@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cascade Engine — Live Dashboard</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    :root {
+      --bg: #0e1116; --panel: #161b22; --panel-2: #1c232c; --border: #2a323d;
+      --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
+      --ok: #3fb950; --warn: #d29922; --bad: #f85149;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+    .wrap { max-width: 1100px; margin: 0 auto; padding: 24px; }
+    header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 20px; }
+    h1 { font-size: 20px; margin: 0; font-weight: 600; }
+    .sub { color: var(--muted); font-size: 13px; }
+    .spacer { flex: 1; }
+    input {
+      background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+      padding: 7px 10px; border-radius: 6px; font-size: 13px; width: 200px;
+    }
+    .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+    .card {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+      padding: 18px; min-height: 90px;
+    }
+    .card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 14px; }
+    .stat { font-size: 30px; font-weight: 650; }
+    .row { display: flex; justify-content: space-between; align-items: center; padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 14px; }
+    .row:last-child { border-bottom: none; }
+    .badge { font-size: 11px; padding: 2px 8px; border-radius: 20px; font-weight: 600; }
+    .bar { height: 7px; border-radius: 4px; background: var(--panel-2); overflow: hidden; margin-top: 6px; }
+    .bar > div { height: 100%; background: var(--accent); }
+    .muted { color: var(--muted); }
+    .err { color: var(--bad); font-size: 13px; }
+    .kv { display: flex; justify-content: space-between; font-size: 13px; padding: 4px 0; }
+    code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useCallback } = React;
+
+    const COLORS = {
+      healthy: "var(--ok)", closed: "var(--ok)", ok: "var(--ok)",
+      degraded: "var(--warn)", half_open: "var(--warn)",
+      unavailable: "var(--bad)", open: "var(--bad)", unreachable: "var(--bad)",
+    };
+    const colorFor = (s) => COLORS[String(s).toLowerCase()] || "var(--muted)";
+    const pct = (x) => `${(100 * (x || 0)).toFixed(1)}%`;
+
+    function Badge({ value }) {
+      const c = colorFor(value);
+      return <span className="badge" style={{ background: c + "22", color: c }}>{String(value)}</span>;
+    }
+
+    function HealthCard({ health, error }) {
+      const circuit = health && health.circuit;
+      const coreState = health && (typeof health.core === "string" ? health.core
+        : (health.core && health.core.status) || "ok");
+      return (
+        <div className="card">
+          <h2>System Health</h2>
+          {error && <div className="err">{error}</div>}
+          <div className="row"><span>Gateway</span><Badge value={(health && health.gateway) || "?"} /></div>
+          <div className="row"><span>Core service</span><Badge value={coreState || "?"} /></div>
+          <div className="row">
+            <span>Circuit breaker</span>
+            <Badge value={(circuit && circuit.state) || "n/a"} />
+          </div>
+          <div className="row">
+            <span>Cloud fallback</span>
+            <span className="muted">{health && health.fallback_configured ? "configured" : "off"}</span>
+          </div>
+        </div>
+      );
+    }
+
+    function EnginesCard({ engines }) {
+      const ids = Object.keys(engines || {});
+      return (
+        <div className="card">
+          <h2>Engines — Reliability</h2>
+          {ids.length === 0 && <div className="muted">No engine data yet.</div>}
+          {ids.sort((a, b) => (engines[a].tier || 0) - (engines[b].tier || 0)).map((id) => {
+            const e = engines[id];
+            const ema = e.reliability_ema != null ? e.reliability_ema : e.reliability;
+            return (
+              <div key={id} style={{ padding: "8px 0", borderBottom: "1px solid var(--border)" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span>{id} <span className="muted">· T{e.tier}</span></span>
+                  <Badge value={e.status} />
+                </div>
+                <div className="bar"><div style={{ width: pct(ema), background: colorFor(e.status) }} /></div>
+                <div className="kv muted"><span>reliability (EMA)</span><span>{pct(ema)}</span></div>
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+
+    function Distribution({ title, data, label }) {
+      const entries = Object.entries(data || {});
+      const total = entries.reduce((s, [, v]) => s + v, 0) || 1;
+      return (
+        <div className="card">
+          <h2>{title}</h2>
+          {entries.length === 0 && <div className="muted">None.</div>}
+          {entries.sort((a, b) => b[1] - a[1]).map(([k, v]) => (
+            <div key={k} style={{ padding: "6px 0" }}>
+              <div className="kv"><span>{label ? label(k) : k}</span><span className="muted">{v}</span></div>
+              <div className="bar"><div style={{ width: pct(v / total) }} /></div>
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    function TodayCard({ today }) {
+      const t = today || {};
+      return (
+        <div className="card">
+          <h2>Today</h2>
+          <div className="stat">{t.total_events || 0}</div>
+          <div className="muted" style={{ marginBottom: 12 }}>requests</div>
+          <div className="row"><span>Success rate</span><strong>{pct(t.success_rate)}</strong></div>
+          <div className="row"><span>Total cost</span><strong>${(t.total_cost_usd || 0).toFixed(4)}</strong></div>
+        </div>
+      );
+    }
+
+    function App() {
+      const [key, setKey] = useState(localStorage.getItem("cascade_key") || "");
+      const [health, setHealth] = useState(null);
+      const [stats, setStats] = useState(null);
+      const [error, setError] = useState("");
+      const [updated, setUpdated] = useState(null);
+
+      const refresh = useCallback(async () => {
+        try {
+          const h = await fetch("/health").then((r) => r.json()).catch(() => null);
+          if (h) setHealth(h);
+          if (key) {
+            const r = await fetch("/v1/stats", { headers: { Authorization: `Bearer ${key}` } });
+            if (r.status === 401 || r.status === 403) { setError("Invalid API key for /v1/stats"); }
+            else { setStats(await r.json()); setError(""); }
+          } else {
+            setError("Enter an API key to load routing stats.");
+          }
+          setUpdated(new Date());
+        } catch (e) {
+          setError(String(e));
+        }
+      }, [key]);
+
+      useEffect(() => {
+        refresh();
+        const id = setInterval(refresh, 4000);
+        return () => clearInterval(id);
+      }, [refresh]);
+
+      const online = health && health.gateway === "ok";
+      return (
+        <div className="wrap">
+          <header>
+            <div className="dot" style={{ background: online ? "var(--ok)" : "var(--bad)" }} />
+            <div>
+              <h1>Cascade Engine</h1>
+              <div className="sub">Live routing dashboard · auto-refresh 4s
+                {updated && <span> · updated {updated.toLocaleTimeString()}</span>}</div>
+            </div>
+            <div className="spacer" />
+            <input
+              type="password" placeholder="API key (Bearer)" value={key}
+              onChange={(e) => { setKey(e.target.value); localStorage.setItem("cascade_key", e.target.value); }}
+            />
+          </header>
+          <div className="grid">
+            <HealthCard health={health} error={!stats ? error : ""} />
+            <TodayCard today={stats && stats.today} />
+            <EnginesCard engines={stats && stats.engines} />
+            <Distribution title="Tier Distribution" data={stats && stats.today && stats.today.tier_distribution}
+              label={(k) => k === "0" ? "cache" : `Tier ${k}`} />
+            <Distribution title="Failure Modes" data={stats && stats.today && stats.today.failure_mode_distribution} />
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>

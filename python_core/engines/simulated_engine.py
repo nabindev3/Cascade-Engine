@@ -55,6 +55,13 @@ class CalibratedSimulatedEngine(BaseEngine):
         n_out: int = self.avg_output_tokens
         return n_in * self.cost_per_input_token + n_out * self.cost_per_output_token
 
+    # ----- latency estimate for SLA gating (uses the calibrated p50/p99) -----
+    def estimated_latency_ms(self, percentile: float = 0.5) -> float:
+        if percentile <= 0.5:
+            return self.latency_p50_ms
+        frac: float = min(1.0, (percentile - 0.5) / 0.49)
+        return self.latency_p50_ms + (self.latency_p99_ms - self.latency_p50_ms) * frac
+
     # ----- latency: calibrated log-normal -----
     def _sample_latency_ms(self) -> float:
         # Solve a log-normal so that median == p50 and ~p99 quantile == p99.

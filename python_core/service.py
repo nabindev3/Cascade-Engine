@@ -32,6 +32,7 @@ class InferRequest(BaseModel):
     temperature: float = 0.0
     min_tier: int | None = None
     max_cost: float | None = None
+    latency_slo_ms: float | None = None
     metadata: dict = Field(default_factory=dict)
     domain_context: dict = Field(default_factory=dict)
 
@@ -47,6 +48,7 @@ class InferResponse(BaseModel):
     success: bool
     failure_mode: str | None = None
     was_escalated: bool = False
+    sla_violated: bool = False
     routing_path: list[str] = []
     escalation_reasons: list[str] = []
 
@@ -126,6 +128,7 @@ async def infer(req: InferRequest) -> InferResponse:
         domain_context=req.domain_context,
         min_tier=req.min_tier,
         max_cost=req.max_cost,
+        latency_slo_ms=req.latency_slo_ms,
     )
 
     response, decision = await router_instance.route(request)
@@ -146,6 +149,7 @@ async def infer(req: InferRequest) -> InferResponse:
         success=response.success,
         failure_mode=response.failure_mode.value if not response.success else None,
         was_escalated=response.was_escalated,
+        sla_violated=decision.sla_violated,
         routing_path=decision.engines_tried,
         escalation_reasons=decision.escalation_reasons,
     )

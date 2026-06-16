@@ -40,6 +40,10 @@ class RoutingDecision(BaseModel):
     total_cost_usd: float = 0.0
     success: bool = False
 
+    # SLA tracking (Step 5): set when a latency SLO was requested.
+    sla_latency_slo_ms: Optional[float] = None
+    sla_violated: bool = False
+
 
 class RouterConfig(BaseModel):
     """
@@ -65,6 +69,15 @@ class RouterConfig(BaseModel):
     enable_parallel_fallback: bool = False
     enable_local_fallback: bool = True
     timeout_per_tier_ms: float = 30000.0
+
+    # SLA constraints (Step 5 — risk-sensitive CMDP-style caps).
+    # When a request carries `latency_slo_ms`, engines whose risk-adjusted
+    # estimated latency would breach the remaining budget are skipped. If no
+    # tier can satisfy the SLO the constraint is relaxed (best-effort) and the
+    # decision is flagged `sla_violated`.
+    enable_sla_constraints: bool = True
+    # 0.0 → budget against median latency (p50); 1.0 → against the tail (~p99).
+    sla_risk_aversion: float = 0.5
 
 
 class CascadeRouter:
@@ -97,10 +110,33 @@ class CascadeRouter:
 
         best_response: Optional[InferenceResponse] = None
         cumulative_cost: float = 0.0
+        cumulative_latency_est: float = 0.0
         is_escalated: bool = False
         # Engines skipped *only* by the min_tier gate — candidates for the
         # local-fallback safety net if every higher tier fails.
         deferred_low_tier: list[BaseEngine] = []
+
+        # --- SLA feasibility pre-pass (Step 5) ---
+        # Decide once whether the latency SLO can be met by *any* permitted tier.
+        # If not, relax the constraint and serve best-effort (flagged), rather
+        # than failing a request no tier could ever satisfy.
+        sla_feasible: bool = True
+        if self.config.enable_sla_constraints and request.latency_slo_ms is not None:
+            decision.sla_latency_slo_ms = request.latency_slo_ms
+            pct: float = self._sla_percentile()
+            permitted = [
+                e for e in self.engines
+                if not (request.min_tier and e.tier < request.min_tier)
+            ]
+            sla_feasible = any(
+                e.estimated_latency_ms(pct) <= request.latency_slo_ms for e in permitted
+            )
+            if not sla_feasible:
+                decision.sla_violated = True
+                decision.escalation_reasons.append(
+                    f"SLA infeasible: no permitted tier meets "
+                    f"{request.latency_slo_ms:.0f}ms at p{int(pct * 100)} — serving best-effort"
+                )
 
         for engine in self.engines:
             # --- Gate 1: Minimum tier constraint ---
@@ -108,8 +144,10 @@ class CascadeRouter:
                 deferred_low_tier.append(engine)
                 continue
 
-            # --- Gates 2-4: health, reliability, cost budget ---
-            if not self._engine_is_eligible(engine, request, cumulative_cost, decision):
+            # --- Gates 2-5: health, reliability, cost budget, latency SLO ---
+            if not self._engine_is_eligible(
+                engine, request, cumulative_cost, cumulative_latency_est, sla_feasible, decision
+            ):
                 continue
 
             # --- Attempt inference ---
@@ -118,6 +156,7 @@ class CascadeRouter:
 
             response: InferenceResponse = await engine.predict(request)
             cumulative_cost += response.cost_usd
+            cumulative_latency_est += response.latency_ms
 
             # Update reliability EMA
             self._update_reliability(engine.engine_id, response.success)
@@ -147,6 +186,7 @@ class CascadeRouter:
                 decision.success = True
                 decision.total_latency_ms = (time.perf_counter() - start) * 1000
                 decision.total_cost_usd = cumulative_cost
+                self._mark_sla(decision, request)
                 return response, decision
             else:
                 # Confidence too low — escalate
@@ -166,7 +206,11 @@ class CascadeRouter:
             and deferred_low_tier
         ):
             for engine in deferred_low_tier:  # already sorted cheapest-first
-                if not self._engine_is_eligible(engine, request, cumulative_cost, decision):
+                # Latency SLO is intentionally relaxed here (sla_feasible=False):
+                # this path only runs after every permitted tier already failed.
+                if not self._engine_is_eligible(
+                    engine, request, cumulative_cost, cumulative_latency_est, False, decision
+                ):
                     continue
 
                 decision.tiers_attempted.append(engine.tier)
@@ -177,6 +221,7 @@ class CascadeRouter:
 
                 response = await engine.predict(request)
                 cumulative_cost += response.cost_usd
+                cumulative_latency_est += response.latency_ms
                 self._update_reliability(engine.engine_id, response.success)
                 response.was_escalated = True
 
@@ -188,6 +233,7 @@ class CascadeRouter:
                     decision.success = True
                     decision.total_latency_ms = (time.perf_counter() - start) * 1000
                     decision.total_cost_usd = cumulative_cost
+                    self._mark_sla(decision, request)
                     return response, decision
 
                 decision.escalation_reasons.append(
@@ -211,18 +257,37 @@ class CascadeRouter:
                 error_message="No available engine in cascade",
             )
 
+        self._mark_sla(decision, request)
         return best_response, decision
+
+    def _sla_percentile(self) -> float:
+        """Latency percentile to budget against, from the risk-aversion knob.
+
+        risk_aversion 0 → p50 (median); 1 → ~p99 (tail-aware / conservative).
+        """
+        ra: float = max(0.0, min(1.0, self.config.sla_risk_aversion))
+        return 0.5 + 0.49 * ra
+
+    def _mark_sla(self, decision: RoutingDecision, request: InferenceRequest) -> None:
+        """Flag the decision if the *actual* total latency breached the SLO."""
+        if request.latency_slo_ms is None:
+            return
+        decision.sla_latency_slo_ms = request.latency_slo_ms
+        if decision.total_latency_ms > request.latency_slo_ms:
+            decision.sla_violated = True
 
     def _engine_is_eligible(
         self,
         engine: BaseEngine,
         request: InferenceRequest,
         cumulative_cost: float,
+        cumulative_latency_est: float,
+        sla_feasible: bool,
         decision: RoutingDecision,
     ) -> bool:
-        """Health, reliability, and cost-budget gates shared by the main cascade
-        and the local-fallback path. Appends a reason to ``decision`` when an
-        engine is gated out, and returns False; returns True if the engine may run.
+        """Health, reliability, cost-budget, and latency-SLO gates shared by the
+        main cascade and the local-fallback path. Appends a reason to ``decision``
+        when an engine is gated out, and returns False; True if it may run.
         """
         # --- Engine health ---
         if engine.status == EngineStatus.UNAVAILABLE:
@@ -239,7 +304,7 @@ class CascadeRouter:
             )
             return False
 
-        # --- Cost budget ---
+        # --- Cost budget (cost SLO) ---
         estimated: float = engine.estimated_cost(request)
         if request.max_cost and (cumulative_cost + estimated) > request.max_cost:
             decision.escalation_reasons.append(
@@ -251,6 +316,21 @@ class CascadeRouter:
                 f"{engine.engine_id}: would exceed global budget"
             )
             return False
+
+        # --- Latency SLO (risk-adjusted) ---
+        if (
+            sla_feasible
+            and self.config.enable_sla_constraints
+            and request.latency_slo_ms is not None
+        ):
+            pct: float = self._sla_percentile()
+            est_latency: float = engine.estimated_latency_ms(pct)
+            if cumulative_latency_est + est_latency > request.latency_slo_ms:
+                decision.escalation_reasons.append(
+                    f"{engine.engine_id}: est latency {est_latency:.0f}ms (p{int(pct * 100)}) "
+                    f"would breach SLO {request.latency_slo_ms:.0f}ms"
+                )
+                return False
 
         return True
 

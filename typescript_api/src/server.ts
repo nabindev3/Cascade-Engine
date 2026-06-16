@@ -16,6 +16,7 @@ import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import { v4 as uuidv4 } from "uuid";
 import pino from "pino";
+import { CircuitBreaker } from "./circuitBreaker.js";
 
 // The pino-pretty transport runs in a worker thread; skip it under tests so the
 // test runner can tear down cleanly (and to keep test output quiet).
@@ -28,6 +29,28 @@ const app = express();
 const PORT = parseInt(process.env.GATEWAY_PORT || "3000");
 const CORE_URL = process.env.CORE_SERVICE_URL || "http://localhost:8000";
 const API_KEYS = new Set((process.env.API_KEYS || "dev-key-123").split(","));
+
+// ─── Circuit breaker + direct cloud fallback ────────────────────────────────
+//
+// When the Python core is unhealthy (network error, 5xx, or timeout) the
+// breaker opens and the gateway stops hammering it. While the core is down,
+// requests are served by a direct call to a cloud LLM (degraded mode) if a
+// fallback key is configured; otherwise the gateway fails fast.
+const CORE_CIRCUIT_FAILURE_THRESHOLD = parseInt(
+  process.env.CORE_CIRCUIT_FAILURE_THRESHOLD || "5"
+);
+const CORE_CIRCUIT_COOLDOWN_MS = parseInt(
+  process.env.CORE_CIRCUIT_COOLDOWN_MS || "30000"
+);
+const FALLBACK_API_KEY = process.env.FALLBACK_OPENAI_API_KEY || "";
+const FALLBACK_BASE_URL =
+  process.env.FALLBACK_OPENAI_BASE_URL || "https://api.openai.com/v1";
+const FALLBACK_MODEL = process.env.FALLBACK_MODEL || "gpt-4o-mini";
+
+const coreBreaker = new CircuitBreaker({
+  failureThreshold: CORE_CIRCUIT_FAILURE_THRESHOLD,
+  cooldownMs: CORE_CIRCUIT_COOLDOWN_MS,
+});
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
 
@@ -91,6 +114,182 @@ interface InferResponse {
   failure_mode?: string;
   routing_path: string[];
   escalation_reasons: string[];
+  /** Set when the response came from the gateway's direct cloud fallback. */
+  degraded?: boolean;
+}
+
+/** Error thrown when the breaker is open and the call is short-circuited. */
+class CircuitOpenError extends Error {
+  constructor() {
+    super("core circuit open");
+  }
+}
+
+/** Error carrying a propagatable HTTP status from the core. */
+class CoreHttpError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly body: string,
+    /** true ⇒ core is unhealthy (5xx), should trip breaker + try fallback. */
+    public readonly unhealthy: boolean
+  ) {
+    super(`core HTTP ${status}`);
+  }
+}
+
+// ─── Core call + fallback ───────────────────────────────────────────────────
+
+/** Call the Python core, updating the circuit breaker. Throws on failure. */
+async function callCoreInfer(payload: object): Promise<InferResponse> {
+  if (!coreBreaker.allowRequest()) {
+    throw new CircuitOpenError();
+  }
+
+  let resp: Response;
+  try {
+    resp = await fetch(`${CORE_URL}/infer`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  } catch (err) {
+    coreBreaker.recordFailure();
+    throw err;
+  }
+
+  if (resp.status >= 500) {
+    coreBreaker.recordFailure();
+    throw new CoreHttpError(resp.status, await resp.text(), true);
+  }
+  if (!resp.ok) {
+    // 4xx is a client problem, not core ill-health — don't trip the breaker.
+    throw new CoreHttpError(resp.status, await resp.text(), false);
+  }
+
+  coreBreaker.recordSuccess();
+  return (await resp.json()) as InferResponse;
+}
+
+/**
+ * Degraded-mode path: call a cloud LLM directly when the core is unavailable.
+ * Returns null when no fallback is configured or the fallback call fails.
+ */
+async function directCloudFallback(
+  body: InferRequest,
+  requestId: string
+): Promise<InferResponse | null> {
+  if (!FALLBACK_API_KEY) return null;
+  try {
+    const resp = await fetch(`${FALLBACK_BASE_URL}/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${FALLBACK_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: FALLBACK_MODEL,
+        messages: [{ role: "user", content: body.prompt }],
+        max_tokens: body.max_tokens ?? 512,
+        temperature: body.temperature ?? 0.0,
+      }),
+    });
+    if (!resp.ok) return null;
+    const data = (await resp.json()) as {
+      choices?: { message?: { content?: string } }[];
+    };
+    const content = data?.choices?.[0]?.message?.content ?? "";
+    return {
+      request_id: requestId,
+      content,
+      engine_used: `gateway-fallback:${FALLBACK_MODEL}`,
+      tier: 0,
+      confidence: 0,
+      latency_ms: 0,
+      cost_usd: 0,
+      success: true,
+      routing_path: ["gateway-fallback"],
+      escalation_reasons: ["core unavailable — direct cloud fallback"],
+      degraded: true,
+    };
+  } catch {
+    return null;
+  }
+}
+
+type DispatchOutcome =
+  | { ok: true; result: InferResponse }
+  | { ok: false; status: number; payload: Record<string, unknown> };
+
+/**
+ * Run one inference: try the core, then (on core ill-health) the cloud
+ * fallback, preserving legacy status propagation when no fallback exists.
+ * Shared by the single and batch endpoints.
+ */
+async function dispatchInference(
+  body: InferRequest,
+  requestId: string,
+  clientIp?: string
+): Promise<DispatchOutcome> {
+  const payload = {
+    prompt: body.prompt,
+    task_type: body.task_type || "general",
+    max_tokens: body.max_tokens || 512,
+    temperature: body.temperature || 0.0,
+    min_tier: body.min_tier,
+    max_cost: body.max_cost,
+    metadata: {
+      ...body.metadata,
+      gateway_request_id: requestId,
+      client_ip: clientIp,
+    },
+  };
+
+  try {
+    return { ok: true, result: await callCoreInfer(payload) };
+  } catch (err) {
+    // 4xx from the core: propagate verbatim, never fall back.
+    if (err instanceof CoreHttpError && !err.unhealthy) {
+      return {
+        ok: false,
+        status: err.status,
+        payload: { error: "Core service error", detail: err.body, request_id: requestId },
+      };
+    }
+
+    // Core is unhealthy (5xx / network / circuit open): try degraded fallback.
+    const fb = await directCloudFallback(body, requestId);
+    if (fb) {
+      logger.warn({ msg: "Served via cloud fallback", request_id: requestId });
+      return { ok: true, result: fb };
+    }
+
+    // No fallback available — surface the most accurate error.
+    if (err instanceof CircuitOpenError) {
+      return {
+        ok: false,
+        status: 503,
+        payload: {
+          error: "Core service unavailable (circuit open)",
+          request_id: requestId,
+        },
+      };
+    }
+    if (err instanceof CoreHttpError) {
+      return {
+        ok: false,
+        status: err.status,
+        payload: { error: "Core service error", detail: err.body, request_id: requestId },
+      };
+    }
+    return {
+      ok: false,
+      status: 502,
+      payload: {
+        error: "Failed to reach core inference service",
+        request_id: requestId,
+      },
+    };
+  }
 }
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
@@ -103,12 +302,16 @@ app.get("/health", async (_req, res) => {
     res.json({
       gateway: "ok",
       core: coreHealth,
+      circuit: coreBreaker.snapshot(),
+      fallback_configured: Boolean(FALLBACK_API_KEY),
       timestamp: new Date().toISOString(),
     });
   } catch (err) {
     res.status(503).json({
       gateway: "ok",
       core: "unreachable",
+      circuit: coreBreaker.snapshot(),
+      fallback_configured: Boolean(FALLBACK_API_KEY),
       timestamp: new Date().toISOString(),
     });
   }
@@ -133,63 +336,25 @@ app.post("/v1/infer", authenticate, async (req, res) => {
     prompt_length: body.prompt.length,
   });
 
-  try {
-    const coreResp = await fetch(`${CORE_URL}/infer`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        prompt: body.prompt,
-        task_type: body.task_type || "general",
-        max_tokens: body.max_tokens || 512,
-        temperature: body.temperature || 0.0,
-        min_tier: body.min_tier,
-        max_cost: body.max_cost,
-        metadata: {
-          ...body.metadata,
-          gateway_request_id: requestId,
-          client_ip: req.ip,
-        },
-      }),
-    });
+  const outcome = await dispatchInference(body, requestId, req.ip);
+  const gatewayLatency = Date.now() - startTime;
 
-    if (!coreResp.ok) {
-      const errText = await coreResp.text();
-      logger.error({ msg: "Core service error", status: coreResp.status, body: errText });
-      res.status(coreResp.status).json({
-        error: "Core service error",
-        detail: errText,
-        request_id: requestId,
-      });
-      return;
-    }
-
-    const result: InferResponse = await coreResp.json() as InferResponse;
-    const gatewayLatency = Date.now() - startTime;
-
+  if (outcome.ok) {
     logger.info({
       msg: "Inference complete",
       request_id: requestId,
-      engine: result.engine_used,
-      tier: result.tier,
-      confidence: result.confidence,
+      engine: outcome.result.engine_used,
+      tier: outcome.result.tier,
       latency_ms: gatewayLatency,
-      cost_usd: result.cost_usd,
-      success: result.success,
+      degraded: outcome.result.degraded === true,
+      success: outcome.result.success,
     });
-
-    res.json({
-      ...result,
-      gateway_latency_ms: gatewayLatency,
-    });
-  } catch (err) {
-    const gatewayLatency = Date.now() - startTime;
-    logger.error({ msg: "Request failed", request_id: requestId, error: String(err) });
-    res.status(502).json({
-      error: "Failed to reach core inference service",
-      request_id: requestId,
-      gateway_latency_ms: gatewayLatency,
-    });
+    res.json({ ...outcome.result, gateway_latency_ms: gatewayLatency });
+    return;
   }
+
+  logger.error({ msg: "Request failed", request_id: requestId, status: outcome.status });
+  res.status(outcome.status).json({ ...outcome.payload, gateway_latency_ms: gatewayLatency });
 });
 
 // Stats endpoint
@@ -218,20 +383,16 @@ app.post("/v1/infer/batch", authenticate, async (req, res) => {
   }
 
   const results = await Promise.allSettled(
-    prompts.map(async (prompt) => {
-      const resp = await fetch(`${CORE_URL}/infer`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt, ...shared }),
-      });
-      return resp.json();
-    })
+    prompts.map((prompt) =>
+      dispatchInference({ ...shared, prompt } as InferRequest, uuidv4(), req.ip)
+    )
   );
 
   res.json({
-    results: results.map((r) =>
-      r.status === "fulfilled" ? r.value : { error: String(r.reason) }
-    ),
+    results: results.map((r) => {
+      if (r.status !== "fulfilled") return { error: String(r.reason) };
+      return r.value.ok ? r.value.result : r.value.payload;
+    }),
   });
 });
 
@@ -248,3 +409,4 @@ if (process.env.NODE_ENV !== "test") {
 }
 
 export default app;
+export { coreBreaker };

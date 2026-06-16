@@ -44,7 +44,8 @@ class InferenceRequest(BaseModel):
 
     # Routing hints (optional — the router can override these)
     min_tier: Optional[int] = None       # Skip tiers below this
-    max_cost: Optional[float] = None     # Budget ceiling for this request
+    max_cost: Optional[float] = None     # Budget ceiling for this request (cost SLO)
+    latency_slo_ms: Optional[float] = None  # Latency SLO — skip tiers likely to breach it
 
 
 class InferenceResponse(BaseModel):
@@ -113,6 +114,24 @@ class BaseEngine(ABC):
     def estimated_cost(self, request: InferenceRequest) -> float:
         """Estimate cost in USD for this request (before execution)."""
         ...
+
+    def estimated_latency_ms(self, percentile: float = 0.5) -> float:
+        """Estimate response latency at a given percentile, for SLA gating.
+
+        Reads ``latency_p50_ms`` / ``latency_p99_ms`` from config when present,
+        otherwise falls back to a tier-based heuristic (cloud tiers are slower).
+        Interpolates linearly between p50 and p99 over ``percentile ∈ [0.5, 0.99]``
+        so a risk-averse router can budget against a tail latency rather than the
+        median. Engines with real calibration data should override this.
+        """
+        p50: float = self.config.get("latency_p50_ms") or {
+            1: 200.0, 2: 600.0, 3: 1200.0
+        }.get(self.tier, 800.0)
+        p99: float = self.config.get("latency_p99_ms") or (p50 * 5.0)
+        if percentile <= 0.5:
+            return float(p50)
+        frac: float = min(1.0, (percentile - 0.5) / 0.49)
+        return float(p50 + (p99 - p50) * frac)
 
     @abstractmethod
     async def health_check(self) -> EngineStatus:
